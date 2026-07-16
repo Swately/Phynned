@@ -1,0 +1,27 @@
+# Build trees (per-config)
+build/
+build-release/
+release-staging/
+
+# CMake / FetchContent artifacts anywhere
+_deps/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Editor / tooling caches
+.cache/
+.vs/
+*.user
+
+# Raw benchmark captures (~65 MB of CSVs) — present in the working tree,
+# deliberately kept out of git history (docs/README.md documents this design).
+docs/reports/raw_data/
+
+# Release zips
+ayama-*-windows-x64.zip
+
+# Scratch
+*.bak
+*.rej
+*.orig

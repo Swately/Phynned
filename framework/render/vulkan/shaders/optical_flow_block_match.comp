@@ -1,0 +1,92 @@
+// framework/render/vulkan/shaders/optical_flow_block_match.comp
+// Block-matching motion-vector estimator.
+//
+// For each 8×8 tile of frame A, exhaustively searches a (2R+1)² window
+// in frame B for the tile that minimises the per-pixel sum of absolute
+// differences (SAD). The winning offset is the estimated motion vector
+// for that tile. Output is a low-resolution (input/8) RG16F image of
+// motion vectors in PIXEL units.
+//
+// Used by FrameInterpolatorNode::Algorithm::OpticalFlow to produce a
+// dense motion field that drives the warp-and-blend pass.
+//
+// Bindings:
+//   set=0 binding=0  combined image sampler — frame A
+//   set=0 binding=1  combined image sampler — frame B
+//   set=0 binding=2  storage image (rg16f)  — output motion vectors
+//                                            (width/8 × height/8)
+//
+// Push constants:
+//   int search_radius  pixel-radius of the search window. Total
+//                      candidates evaluated per tile: (2R+1)².
+//
+// Workgroup size: 8×8 — one invocation per output texel (= per tile).
+//
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_frame_a;
+layout(set = 0, binding = 1) uniform sampler2D u_frame_b;
+layout(set = 0, binding = 2, rg16f) uniform writeonly image2D u_motion_vectors;
+
+layout(push_constant) uniform PushConsts {
+    int  search_radius;
+} pc;
+
+const int kBlockSize = 8;
+
+void main() {
+    // gl_GlobalInvocationID.xy = tile index = output texel coords.
+    const ivec2 tile_idx = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 mv_size  = imageSize(u_motion_vectors);
+    if (tile_idx.x >= mv_size.x || tile_idx.y >= mv_size.y) return;
+
+    const ivec2 tile_origin = tile_idx * kBlockSize;
+    const ivec2 frame_size  = textureSize(u_frame_a, 0);
+
+    // Read the reference tile from A once into registers.
+    // 8×8 = 64 invocations; one float3 per pixel is fine in registers.
+    vec3 ref_block[kBlockSize * kBlockSize];
+    for (int py = 0; py < kBlockSize; ++py) {
+        for (int px = 0; px < kBlockSize; ++px) {
+            const ivec2 a_pos = tile_origin + ivec2(px, py);
+            // Clamp to texture bounds so the SAD still treats out-of-bounds
+            // pixels deterministically rather than producing garbage.
+            const ivec2 a_clamped = clamp(a_pos, ivec2(0), frame_size - 1);
+            ref_block[py * kBlockSize + px] = texelFetch(u_frame_a, a_clamped, 0).rgb;
+        }
+    }
+
+    // Search loop: (2R+1)² candidates. R is bounded by push-constant
+    // limits (256 bytes), in practice ≤ 16 — gives a 33×33 window =
+    // 1089 candidates per tile. Each candidate evaluates 64 SAD terms.
+    float best_sad = 1e30;
+    ivec2 best_mv  = ivec2(0);
+
+    for (int dy = -pc.search_radius; dy <= pc.search_radius; ++dy) {
+        for (int dx = -pc.search_radius; dx <= pc.search_radius; ++dx) {
+            float sad = 0.0;
+            for (int py = 0; py < kBlockSize; ++py) {
+                for (int px = 0; px < kBlockSize; ++px) {
+                    const ivec2 b_pos = tile_origin + ivec2(px, py) + ivec2(dx, dy);
+                    const ivec2 b_clamped = clamp(b_pos, ivec2(0), frame_size - 1);
+                    const vec3 b_pix = texelFetch(u_frame_b, b_clamped, 0).rgb;
+                    const vec3 r_pix = ref_block[py * kBlockSize + px];
+                    sad += abs(r_pix.r - b_pix.r)
+                         + abs(r_pix.g - b_pix.g)
+                         + abs(r_pix.b - b_pix.b);
+                }
+            }
+            // Strict-less-than: ties favour the centre (small motion).
+            if (sad < best_sad) {
+                best_sad = sad;
+                best_mv  = ivec2(dx, dy);
+            }
+        }
+    }
+
+    // Motion vector points from A's tile origin to B's matching tile.
+    imageStore(u_motion_vectors, tile_idx,
+               vec4(float(best_mv.x), float(best_mv.y), 0.0, 0.0));
+}

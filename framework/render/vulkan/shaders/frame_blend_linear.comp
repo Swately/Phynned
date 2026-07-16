@@ -1,0 +1,46 @@
+// framework/render/vulkan/shaders/frame_blend_linear.comp
+// LinearBlend compute shader — produces an interpolated frame C from
+// two input frames A and B as the pixel-wise midpoint:
+//
+//   C[x,y] = 0.5 · A[x,y] + 0.5 · B[x,y]
+//
+// Used by FrameInterpolatorNode::Algorithm::LinearBlend to insert a
+// blended frame between A and B in the output stream, triplicating the
+// effective frame rate at the cost of mild ghosting on fast motion.
+//
+// Bindings:
+//   set=0 binding=0  combined image sampler — input A
+//   set=0 binding=1  combined image sampler — input B
+//   set=0 binding=2  storage image (rgba8)  — output C
+//
+// Workgroup size 8×8 = 64 invocations per group. Chosen to match Nvidia's
+// 32-thread warp + AMD's 64-thread wavefront — one wave per workgroup.
+// Dispatch ceil(width/8) × ceil(height/8) groups.
+//
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_input_a;
+layout(set = 0, binding = 1) uniform sampler2D u_input_b;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D u_output;
+
+void main() {
+    const ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size  = imageSize(u_output);
+
+    // Guard against out-of-bounds invocations from the workgroup rounding.
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    // Centred UV coordinates so the texture filter samples the correct
+    // texel even when the sampler has linear filtering enabled. With
+    // NEAREST sampling this is equivalent to texelFetch().
+    const vec2 uv = (vec2(coord) + vec2(0.5)) / vec2(size);
+
+    const vec4 a = texture(u_input_a, uv);
+    const vec4 b = texture(u_input_b, uv);
+
+    // Pixel-wise midpoint. mix(a, b, 0.5) is equivalent and emits the
+    // same SPIR-V; spelled explicitly for clarity at the call site.
+    imageStore(u_output, coord, 0.5 * (a + b));
+}
