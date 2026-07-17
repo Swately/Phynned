@@ -1,4 +1,4 @@
-# Ayama — architecture
+# Phynned — architecture
 
 > Self-contained since the 2026-07-16 separation (see
 > [`plans/AYAMA_SEPARATION_MASTER_PLAN.md`](plans/AYAMA_SEPARATION_MASTER_PLAN.md)).
@@ -7,7 +7,7 @@
 
 ## The system in one paragraph
 
-Ayama is three cooperating processes. **`ayama-agent`** (the brain, admin) runs a
+Phynned is three cooperating processes. **`ayama-agent`** (the brain, admin) runs a
 single-threaded 100 ms tick: an ETW kernel session + process-table scan feed a
 classifier that decides which processes are performance-sensitive games; a rule
 engine turns that into affinity/priority actions; an executor applies them with
@@ -28,7 +28,7 @@ protocol.
 | `action/` | Act: apply affinity/priority, audit every action | `ActionExecutor`, `ActionLog`, `AuditLog` |
 | `learn/` | Remember: per-game outcome history, stale-entry expiry | `PerGameMemory`, `LearnedEntry` |
 | `bench/` | Prove: A/B/A/B/A runner, PresentMon capture, statistics, perceptual metrics | `ABRunner`, `Baseline`, `DiffReport`, `PerceptualMetrics` |
-| `ipc/` | Publish: agent → UI shared-memory channel | `AyamaAgentPublisher`, `AyamaClient`, `AyamaProtocol` |
+| `ipc/` | Publish: agent → UI shared-memory channel | `AyamaAgentPublisher`, `PhynnedClient`, `PhynnedProtocol` |
 | `config/` | Configure: TOML stores, default policy pack | `ConfigStore`, `DefaultPolicyPack` |
 | `core/` | Orchestrate: the tick loop, watchdogs, self-monitoring, single-instance | `AgentRuntime`, `AdaptiveTick`, `AutoRevertGuard`, `InternalWatchdog`, `SelfMonitor` |
 
@@ -54,7 +54,7 @@ state over phyriad::ipc       (NtQuerySystemInformation)
 
 ## The vendored framework (17 units)
 
-Ayama's substrate is its own snapshot under `framework/` — the project builds
+Phynned's substrate is its own snapshot under `framework/` — the project builds
 with zero references outside its tree. Direct consumers: `hal`, `schema`,
 `topology`, `tuning`, `process`, `stigmergy`, `etw`, `ipc`, `node`, `ui`, plus
 `<phyriad/version.hpp>` from `_meta`. Transitives: `graph` (hosts the
@@ -71,10 +71,18 @@ pinned tags the substrate used); they are the only network dependency.
 `testbench.ps1` configures with `-DAYAMA_BUILD_TESTS=ON -DPHYRIAD_BUILD_TESTS=ON`,
 builds, **asserts the discovered-test set is non-empty** (a ctest quirk returns
 exit 0 on an empty set — that false green hid a failing test for ~9 weeks until
-2026-07-16), and runs everything: Ayama's 10 module tests + the vendored
+2026-07-16), and runs everything: Phynned's 10 module tests + the vendored
 pillars' own suites (49 total at separation). Known coverage gaps, recorded
 honestly: `config/` has no test source (`ayama_config_test` is declared behind
 an `if(EXISTS)` that has never been true) and `ipc/` has no tests at all (no
 `tests/` directory, no `add_test`) — 6 of the 8 modules are covered.
+
+Known failing test under elevation (found 2026-07-16, pre-dates the rename):
+`agent_idle_budget_test` asserts `stop()` completes in < 2 s, but when the
+suite runs **as Administrator** the ETW session actually starts and its
+teardown takes ~5.1 s (measured twice: 5069/5085 ms) — the bound was only
+ever exercised unelevated, where ETW never engages. Open defect: either the
+shutdown path must interrupt the ETW consumer faster, or the bound must
+encode the elevated reality. 48/49 pass elevated; 49/49 unelevated.
 
 <!-- Made with my soul - Swately <3 -->

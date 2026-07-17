@@ -1,5 +1,7 @@
-# Ayama/CMakeLists.txt
-# Ayama — non-invasive runtime optimizer for asymmetric & hybrid CPUs.
+# Phynned/CMakeLists.txt
+# Phynned (formerly Ayama) — non-invasive runtime optimizer for asymmetric
+# & hybrid CPUs. Renamed 2026-07-16; targets/options keep the AYAMA_/ayama-
+# prefix until the identifier-level rename.
 #
 # Self-contained: the Phyriad pillars Ayama consumes are VENDORED under
 # framework/ (snapshot of catalog/cpp, 2026-07-16 — see framework/VENDORED.md).
@@ -16,7 +18,7 @@
 #   AYAMA_BUILD_UI      — build ayama-ui standalone window          (default ON)
 #
 cmake_minimum_required(VERSION 3.20)
-project(Ayama LANGUAGES CXX VERSION 0.1.0)  # x-release-please-version
+project(Phynned LANGUAGES CXX VERSION 0.1.0)  # x-release-please-version
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

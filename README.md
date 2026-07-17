@@ -1,4 +1,4 @@
-# Ayama — runtime optimizer for asymmetric & hybrid CPUs
+# Phynned — runtime optimizer for asymmetric & hybrid CPUs
 
 **A non-invasive runtime optimizer for asymmetric multi-CCD and hybrid CPUs,
 with an A/B/A/B/A measurement protocol and a 14-test exploratory catalog on
@@ -7,7 +7,14 @@ for Intel hybrid (P+E) and non-X3D multi-CCD AMD.**
 
 > `0.1.0-experimental` · Windows · student-built, LLM-assisted.
 
-Ayama is a **self-contained project**: the Phyriad pillars it consumes
+> **Renamed from *Ayama* on 2026-07-16** (phy + pinned — pinning with the
+> Phyriad lineage). The executables (`ayama-*.exe`), the `ayama::` namespaces,
+> the Windows service (`AyamaAgent`) and the config paths
+> (`%LOCALAPPDATA%\Ayama`) keep the old prefix until the identifier-level
+> rename lands — the docs below use the old names wherever they refer to
+> those literals.
+
+Phynned is a **self-contained project**: the Phyriad pillars it consumes
 (topology probe, stigmergy `Classifier`, HAL, ETW session, SHM IPC, ImGui
 application layer) are vendored under [`framework/`](framework/VENDORED.md)
 — its own base, modified at will. It uses the topology probe and the
@@ -39,9 +46,9 @@ ayama-dist/
   scripts/                     <- Defender exclusion helper
 ```
 
-## Quick start (how to use Ayama)
+## Quick start (how to use Phynned)
 
-Ayama ships as a bundle of small executables that live next to each other
+Phynned ships as a bundle of small executables that live next to each other
 in a single directory (the in-tree dev build puts them in
 `build/ayama-dist/`; installs place them in `%LOCALAPPDATA%\Ayama`). Choose
 whichever entry point matches how you want to use it.
@@ -52,7 +59,7 @@ The most common path. Launch `ayama-ui.exe` and everything else happens
 for you:
 
   1. Double-click `ayama-ui.exe`.
-  2. Windows asks for elevation (UAC) — say **Yes**. Ayama needs
+  2. Windows asks for elevation (UAC) — say **Yes**. Phynned needs
      administrator rights to set CPU affinity on game processes owned by
      other users and to start an ETW kernel session.
   3. Read the **AntiCheat compatibility notice** that appears on every
@@ -112,21 +119,21 @@ prompts. Remove with `ayama-service-register.exe uninstall`.
 
 ## Windows Defender — first-launch false positives
 
-Ayama binaries are **unsigned** in `0.1.0-experimental` (no commercial
+Phynned binaries are **unsigned** in `0.1.0-experimental` (no commercial
 code-signing certificate). Windows Defender and SmartScreen often flag unsigned
 executables that change process affinity + spawn child processes as
-"potentially unwanted" — even though Ayama only uses public Win32 APIs
+"potentially unwanted" — even though Phynned only uses public Win32 APIs
 (no kernel driver, no code injection, no game-memory reads).
 
 If Defender blocks `ayama-ui.exe` on first launch, two options:
 
-### Option A — Whitelist Ayama (recommended)
+### Option A — Whitelist Phynned (recommended)
 
 Right-click `scripts/add-defender-exclusion.ps1` → **Run with PowerShell**
 (as Administrator). The script:
-- Adds the Ayama install directory + `%LOCALAPPDATA%\Ayama` to Defender's
+- Adds the Phynned install directory + `%LOCALAPPDATA%\Ayama` to Defender's
   exclusion paths.
-- Adds each Ayama executable (`ayama-ui.exe`, `ayama-agent.exe`,
+- Adds each Phynned executable (`ayama-ui.exe`, `ayama-agent.exe`,
   `ayama-cli.exe`, `ayama-bench.exe`, `ayama-service-register.exe`) as
   process exclusions.
 
@@ -135,7 +142,7 @@ Reverting is one command:
 .\scripts\add-defender-exclusion.ps1 -Remove
 ```
 
-Defender stays fully active for everything else — only Ayama is excluded.
+Defender stays fully active for everything else — only Phynned is excluded.
 
 ### Option B — Submit to Microsoft as a false positive
 
@@ -143,14 +150,14 @@ If you'd rather not whitelist anything, submit the binaries to
 [submit.microsoft.com](https://www.microsoft.com/en-us/wdsi/filesubmission)
 as a false positive. Microsoft's analysts typically respond within 48
 hours and update SmartScreen reputation accordingly. Once enough users
-download Ayama, the reputation builds automatically.
+download Phynned, the reputation builds automatically.
 
 ### Why this happens
 
 Process-affinity tools have a long history of being bundled with cheats
 or grey-market "optimizers", so Defender's heuristics tend to flag any
 binary that calls `SetProcessAffinityMask` on processes owned by other
-users. Ayama's design (Win32-only, no kernel driver, no code injection)
+users. Phynned's design (Win32-only, no kernel driver, no code injection)
 is verifiable from the source — see [`action/`](action/) for the
 complete list of API calls.
 
@@ -181,7 +188,7 @@ The agent **hot-reloads `overrides.txt`** whenever its mtime changes, so
 edits made from the UI's *Targets > Manual classification overrides*
 section take effect on the agent's next tick (~100 ms).
 
-## What Ayama does and does NOT do
+## What Phynned does and does NOT do
 
 **Does:**
 - Read the Windows process table and your CPU's topology.
@@ -198,7 +205,7 @@ section take effect on the agent's next tick (~100 ms).
 - Modify game files, shaders, or graphics drivers.
 - Send telemetry over the network (no analytics, no phone-home).
 
-This makes Ayama safe with most anticheat systems — but kernel-level
+This makes Phynned safe with most anticheat systems — but kernel-level
 anticheat may still flag the OS-level affinity changes as suspicious.
 **Always read the AntiCheat notice in the UI and exclude competitive
 games from optimization** if you're risk-averse.
@@ -236,9 +243,9 @@ those.
 
 ---
 
-## What makes Ayama different
+## What makes Phynned different
 
-| | Ayama | Process Lasso | Win 11 Game Mode |
+| | Phynned | Process Lasso | Win 11 Game Mode |
 |---|---|---|---|
 | Hardware target | Asymmetric / hybrid CPUs (X3D, Intel P/E, non-X3D multi-CCD) | any CPU | any |
 | Cost | Free (MIT) | $30 (one-time) | Free (bundled) |
@@ -248,7 +255,7 @@ those.
 | Open source | **Yes** | No | No |
 | Anti-cheat compatible | No (out of scope) | partial | yes |
 
-Ayama is **not** trying to replace Process Lasso. It's a focused optimizer
+Phynned is **not** trying to replace Process Lasso. It's a focused optimizer
 for asymmetric topologies (V-Cache CCDs, P/E cores, multi-CCD) that publishes
 its measurement protocol and per-game reports — something no comparable tool
 does — with the dataset's provisional status stated rather than hidden.
@@ -260,7 +267,7 @@ does — with the dataset's provisional status stated rather than hidden.
 ### Requirements
 
 - Windows 11 (10 may work, untested)
-- One of the supported CPU families below (Ayama auto-detects which strategy to use):
+- One of the supported CPU families below (Phynned auto-detects which strategy to use):
 
 | CPU family | Strategy auto-selected | Empirical validation |
 |---|---|---|
@@ -268,7 +275,7 @@ does — with the dataset's provisional status stated rather than hidden.
 | **AMD X3D single-CCD** (7800X3D, 9800X3D) | Pin games to V-Cache cores; no eviction needed | Strategy proven on dual-CCD; single-CCD inherits the pinning half |
 | **Intel hybrid** (12th gen+ Alder/Raptor/Meteor/Arrow Lake) | Pin games to P-cores; move background to E-cores | ✅ Code-tested; empirical sweep deferred to a future release |
 | **AMD multi-CCD non-X3D** (5950X, 7950X, 9950X) | Isolate games on CCD0; background on CCD1+ | ✅ Code-tested; reduces cross-CCD migrations |
-| **Symmetric single-CCD** (any) | Monitor only (no benefit from affinity) | N/A — Ayama skips affinity changes |
+| **Symmetric single-CCD** (any) | Monitor only (no benefit from affinity) | N/A — Phynned skips affinity changes |
 
 - Administrator privileges (required for ETW and cross-process affinity)
 
@@ -284,15 +291,15 @@ does — with the dataset's provisional status stated rather than hidden.
 ### First run
 
 1. Start any game (single-player, no anti-cheat — see [FAQ](docs/FAQ.md))
-2. Open Ayama UI
+2. Open Phynned UI
 3. Tab "Dashboard" shows real-time agent status
 4. Tab "Benchmark" runs A/B/A/B/A protocol to measure the impact
 
 ---
 
-## How Ayama uses the vendored framework
+## How Phynned uses the vendored framework
 
-| Vendored pillar | Ayama use |
+| Vendored pillar | Phynned use |
 |---|---|
 | `phyriad::hal` / `phyriad::topology` | CPU topology (CCD enumeration, V-Cache detection, P/E core classification), affinity APIs |
 | `phyriad::process` | Bulk process enumeration via `NtQuerySystemInformation` |
@@ -305,13 +312,13 @@ does — with the dataset's provisional status stated rather than hidden.
 The full pillar list and why each is vendored:
 [`framework/VENDORED.md`](framework/VENDORED.md).
 
-Note: the Ayama agent is single-threaded by design (one tick every 100 ms),
+Note: the Phynned agent is single-threaded by design (one tick every 100 ms),
 so it does **not** use a thread pool for work distribution. The decision
 loop is per-target, not per-task.
 
 The pattern this codifies — observe shared state, decide, emit
 trace — is the stigmergic-dispatch pattern documented in
-[docs/STIGMERGY.md](docs/STIGMERGY.md). Ayama was the original
+[docs/STIGMERGY.md](docs/STIGMERGY.md). Phynned was the original
 production use case; the pattern was extracted afterward into
 `phyriad::stigmergy::*` as a library pillar.
 
@@ -343,10 +350,10 @@ production use case; the pattern was extracted afterward into
 Released under the [**MIT License**](LICENSE) — free to use, modify, and
 distribute. © 2026 Eduardo Ramos Mendoza (Swately).
 
-If you use Ayama or any of its code, the MIT license requires you to
+If you use Phynned or any of its code, the MIT license requires you to
 **keep the copyright notice**, i.e. to **credit Eduardo Ramos Mendoza
 (Swately)**. A visible mention in your project's credits, documentation,
-or about screen is appreciated. Ayama is a research/engineering artifact —
+or about screen is appreciated. Phynned is a research/engineering artifact —
 provided "as is" with no warranty.
 
 ## Citation
@@ -354,7 +361,7 @@ provided "as is" with no warranty.
 ```bibtex
 @software{ayama_2026,
   author = {Ramos Mendoza, Eduardo},
-  title  = {Ayama: A Non-Invasive Runtime Optimizer for Asymmetric and
+  title  = {Phynned: A Non-Invasive Runtime Optimizer for Asymmetric and
             Hybrid CPUs},
   year   = {2026},
   note   = {14-test exploratory A/B catalog (provisional, re-validation
