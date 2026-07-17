@@ -1,12 +1,12 @@
-// apps/ayama/bench/tests/abrunner_test.cpp
+// bench/tests/abrunner_test.cpp
 // Test: ABRunner phase state-machine, sample feed, report generation.
 //
 // All inputs are synthetic; no real process or ETW required.
 //
 
-#include <ayama/bench/ABRunner.hpp>
-#include <ayama/bench/DiffReport.hpp>
-#include <ayama/observer/TargetMetrics.hpp>
+#include <phynned/bench/ABRunner.hpp>
+#include <phynned/bench/DiffReport.hpp>
+#include <phynned/observer/TargetMetrics.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -17,14 +17,14 @@ static bool near(float a, float b, float eps = 0.1f) {
     return std::fabs(a - b) < eps;
 }
 
-static ayama::observer::TargetMetrics make_metrics(
+static phynned::observer::TargetMetrics make_metrics(
     uint32_t pid,
     float avg_ms,
     float p99_ms,
     float var_ms,
     float cpu_pct = 25.0f)
 {
-    ayama::observer::TargetMetrics m{};
+    phynned::observer::TargetMetrics m{};
     m.pid                    = pid;
     m.frame_time_avg_ms      = avg_ms;
     m.frame_time_p99_ms      = p99_ms;
@@ -36,8 +36,8 @@ static ayama::observer::TargetMetrics make_metrics(
 }
 
 int main() {
-    using namespace ayama::bench;
-    using namespace ayama::observer;
+    using namespace phynned::bench;
+    using namespace phynned::observer;
 
     // ── Test 1: DiffReport POD ────────────────────────────────────────────────
     {

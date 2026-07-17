@@ -1,8 +1,8 @@
-// apps/ayama/policy/src/PolicyEngine.cpp
+// policy/src/PolicyEngine.cpp
 // PolicyEngine — implementation.
 //
 
-#include <ayama/policy/PolicyEngine.hpp>
+#include <phynned/policy/PolicyEngine.hpp>
 #include <phyriad/topology/HardwareTopology.hpp>
 
 #include <cstring>
@@ -12,13 +12,13 @@
 #include <cstring>  // _stricmp via <string.h> on MinGW
 #endif
 
-namespace ayama::policy {
+namespace phynned::policy {
 
 // ── Protected processes for CCD Load Defense ────
 // Hard-coded list of processes that must NEVER be moved out of the
 // V-Cache CCD by Rule 8, even when they consume CPU during gameplay.
 // Categories:
-//   - Ayama's own processes (would create self-pin recursion)
+//   - Phynned's own processes (would create self-pin recursion)
 //   - Kernel-mode anti-cheat user-mode helpers (moving them may trigger
 //     anti-cheat tampering detection)
 //   - Critical OS services that perform real-time work
@@ -27,10 +27,10 @@ namespace ayama::policy {
 static bool is_protected_from_ccd_defense(const char* exe_name) noexcept {
     if (!exe_name || exe_name[0] == '\0') return false;
     static constexpr const char* kProtected[] = {
-        // ── Ayama's own processes ───────────────────────────────────────
-        "ayama-agent.exe",
-        "ayama-ui.exe",
-        "ayama-cli.exe",
+        // ── Phynned's own processes ───────────────────────────────────────
+        "phynned-agent.exe",
+        "phynned-ui.exe",
+        "phynned-cli.exe",
         // ── Anti-cheat user-mode helpers ────────────────────────────────
         // Touching these risks triggering kernel-mode anti-cheat tampering
         // detection. Even though they're typically Browser/Productivity
@@ -379,7 +379,7 @@ uint32_t PolicyEngine::evaluate(
     //      - Skip Game and System kinds (Game IS the protected workload;
     //        System is OS infrastructure)
     //      - Skip if CPU% below threshold (idle process, doesn't contend)
-    //      - Skip if exe is in the protected list (Ayama, anti-cheat, etc.)
+    //      - Skip if exe is in the protected list (Phynned, anti-cheat, etc.)
     //      - Skip if a decision is ALREADY emitted for this PID by an
     //        earlier rule (Rules 3/4/6 are more specific; let them win)
     //   3. Score by CPU% (higher = more contention pressure)
@@ -421,7 +421,7 @@ uint32_t PolicyEngine::evaluate(
                 // don't contribute meaningfully to CCD contention.
                 if (tm.cpu_usage_pct < kCcdDefenseCpuThresholdPct) continue;
 
-                // Protected list: Ayama's own, anti-cheat, critical OS.
+                // Protected list: Phynned's own, anti-cheat, critical OS.
                 if (is_protected_from_ccd_defense(tp.name)) continue;
 
                 // Skip if a more specific rule already emitted a decision
@@ -480,5 +480,5 @@ uint32_t PolicyEngine::evaluate(
     return n_decisions;
 }
 
-} // namespace ayama::policy
+} // namespace phynned::policy
 // Made with my soul - Swately <3

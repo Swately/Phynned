@@ -1,4 +1,4 @@
-// apps/ayama/learn/tests/learn_test.cpp
+// learn/tests/learn_test.cpp
 // Test T8 — Learn-and-persist (PerGameMemory roundtrip).
 //
 // Verifies:
@@ -15,10 +15,10 @@
 //
 // No admin required. Writes to a temp file in the system temp directory.
 //
-// §9.3, ayama::learn
+// §9.3, phynned::learn
 
-#include <ayama/learn/PerGameMemory.hpp>
-#include <ayama/learn/LearnedEntry.hpp>
+#include <phynned/learn/PerGameMemory.hpp>
+#include <phynned/learn/LearnedEntry.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -42,12 +42,12 @@ static bool make_temp_path(char* out, uint32_t max_len) noexcept
     char tmp_dir[MAX_PATH]{};
     if (!GetTempPathA(MAX_PATH, tmp_dir)) return false;
     std::snprintf(out, max_len,
-                  "%s\\ayama_learn_test_%u.toml",
+                  "%s\\phynned_learn_test_%u.toml",
                   tmp_dir,
                   static_cast<unsigned>(GetCurrentProcessId()));
 #else
     std::snprintf(out, max_len,
-                  "/tmp/ayama_learn_test_%u.toml",
+                  "/tmp/phynned_learn_test_%u.toml",
                   static_cast<unsigned>(getpid()));
 #endif
     return true;
@@ -55,7 +55,7 @@ static bool make_temp_path(char* out, uint32_t max_len) noexcept
 
 int main()
 {
-    using namespace ayama::learn;
+    using namespace phynned::learn;
 
     // ── T8.1: LearnedEntry POD ────────────────────────────────────────────────
     {

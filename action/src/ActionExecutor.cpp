@@ -1,13 +1,13 @@
-// apps/ayama/action/src/ActionExecutor.cpp
+// action/src/ActionExecutor.cpp
 // ActionExecutor — implementation.
 //
 // Uses phyriad::hw::set_process_affinity (FR-3) and phyriad::hw::set_process_priority (FR-9)
-// for pin/priority operations — the ONLY invasive operations Ayama performs.
+// for pin/priority operations — the ONLY invasive operations Phynned performs.
 // These are the hw:: free functions in framework/topology (the formerly-
 // proposed daemon pillar was retired in favor of in-process FR-3/FR-9 APIs).
 //
 
-#include <ayama/action/ActionExecutor.hpp>
+#include <phynned/action/ActionExecutor.hpp>
 #include <phyriad/topology/HardwareTopology.hpp>
 #include <phyriad/hal/Timestamp.hpp>
 
@@ -22,7 +22,7 @@
 #include <windows.h>
 #endif
 
-namespace ayama::action {
+namespace phynned::action {
 
 ActionExecutor::ActionExecutor() noexcept {
     active_.fill(ActiveAction{});
@@ -30,7 +30,7 @@ ActionExecutor::ActionExecutor() noexcept {
 
     // compute the system-wide default affinity mask once. Used
     // by revert() instead of the per-action captured prev_mask, which may be
-    // residual pinning from a previous Ayama session that crashed.
+    // residual pinning from a previous Phynned session that crashed.
     const uint32_t n = phyriad::hw::topology().logical_core_count();
     if (n == 0u || n >= 64u) {
         default_affinity_mask_ = ~0ull;          // all 64 bits
@@ -69,7 +69,7 @@ void ActionExecutor::log_entry(const ActiveAction& a, bool success,
     e.prev_priority_class= a.prev_priority_class;
     // On apply: records the mask actually written, not zero.
     // On revert: new_affinity_mask is the system-default mask (what was
-    // actually applied). prev_affinity_mask keeps the captured pre-Ayama
+    // actually applied). prev_affinity_mask keeps the captured pre-Phynned
     // value so audit shows any drift transparently.
     e.new_affinity_mask  = is_revert ? default_affinity_mask_  : a.new_affinity_mask;
     e.new_priority_class = is_revert ? a.prev_priority_class : a.new_priority_class;
@@ -90,7 +90,7 @@ ActionExecutor::apply_pin_affinity(uint32_t pid, uint64_t mask,
     auto r = phyriad::hw::set_process_affinity(pid, mask);
     if (!r) {
         std::fprintf(stderr,
-            "[Ayama][ActionExecutor] set_process_affinity(pid=%u, mask=0x%llx) failed: %d\n",
+            "[Phynned][ActionExecutor] set_process_affinity(pid=%u, mask=0x%llx) failed: %d\n",
             pid, static_cast<unsigned long long>(mask),
             static_cast<int>(r.error().code));
         return std::unexpected(r.error());
@@ -107,7 +107,7 @@ ActionExecutor::apply_set_priority(uint32_t pid, uint32_t pclass,
     auto r = phyriad::hw::set_process_priority(pid, pclass);
     if (!r) {
         std::fprintf(stderr,
-            "[Ayama][ActionExecutor] set_process_priority(pid=%u, class=%u) failed: %d\n",
+            "[Phynned][ActionExecutor] set_process_priority(pid=%u, class=%u) failed: %d\n",
             pid, pclass, static_cast<int>(r.error().code));
         return std::unexpected(r.error());
     }
@@ -142,7 +142,7 @@ ActionExecutor::apply(const policy::PolicyDecision& d) noexcept {
             success = true;
             a.new_affinity_mask = d.core_mask;   // fix #12 — record applied mask
             std::fprintf(stdout,
-                "[Ayama] PinAffinity: pid=%u mask=0x%llx (prev=0x%llx)\n",
+                "[Phynned] PinAffinity: pid=%u mask=0x%llx (prev=0x%llx)\n",
                 d.target_pid,
                 static_cast<unsigned long long>(d.core_mask),
                 static_cast<unsigned long long>(a.prev_affinity_mask));
@@ -201,7 +201,7 @@ ActionExecutor::apply_differential_pin(uint32_t pid,
     auto pr = phyriad::hw::set_process_affinity(pid, safe_process_mask);
     if (!pr) {
         std::fprintf(stderr,
-            "[Ayama][ActionExecutor] apply_differential_pin: "
+            "[Phynned][ActionExecutor] apply_differential_pin: "
             "set_process_affinity(pid=%u, mask=0x%llx) failed: %d\n",
             pid, static_cast<unsigned long long>(safe_process_mask),
             static_cast<int>(pr.error().code));
@@ -209,13 +209,13 @@ ActionExecutor::apply_differential_pin(uint32_t pid,
     }
     const uint64_t prev_process_mask = *pr;
 
-    // ── Step 2: set thread affinity (GFR-Ayama-2) ──────────────────────
+    // ── Step 2: set thread affinity (GFR-Phynned-2) ──────────────────────
     auto tr = phyriad::hw::set_thread_affinity(tid, safe_thread_mask);
     if (!tr) {
         // Roll back process affinity change to leave system consistent.
         (void)phyriad::hw::set_process_affinity(pid, prev_process_mask);
         std::fprintf(stderr,
-            "[Ayama][ActionExecutor] apply_differential_pin: "
+            "[Phynned][ActionExecutor] apply_differential_pin: "
             "set_thread_affinity(tid=%u, mask=0x%llx) failed: %d (rolled back)\n",
             tid, static_cast<unsigned long long>(safe_thread_mask),
             static_cast<int>(tr.error().code));
@@ -235,7 +235,7 @@ ActionExecutor::apply_differential_pin(uint32_t pid,
     a.active                = true;
 
     std::fprintf(stdout,
-        "[Ayama] DifferentialPin: pid=%u tid=%u proc=0x%llx thread=0x%llx "
+        "[Phynned] DifferentialPin: pid=%u tid=%u proc=0x%llx thread=0x%llx "
         "(prev_proc=0x%llx prev_thread=0x%llx)\n",
         pid, tid,
         static_cast<unsigned long long>(safe_process_mask),
@@ -265,7 +265,7 @@ void ActionExecutor::revert_thread_action(ActiveThreadAction& a) noexcept {
     (void)phyriad::hw::set_process_affinity(a.pid, default_affinity_mask_);
 
     std::fprintf(stdout,
-        "[Ayama] DifferentialPin revert: pid=%u tid=%u -> default=0x%llx "
+        "[Phynned] DifferentialPin revert: pid=%u tid=%u -> default=0x%llx "
         "(captured prev_proc=0x%llx prev_thread=0x%llx)\n",
         a.pid, a.tid,
         static_cast<unsigned long long>(default_affinity_mask_),
@@ -307,7 +307,7 @@ void ActionExecutor::revert(uint32_t pid) noexcept {
     if (!a) return;
 
     // Restore to system-default affinity, not the per-action captured mask.
-    // The captured mask may be a residual from a previous Ayama instance
+    // The captured mask may be a residual from a previous Phynned instance
     // that crashed without calling revert_all(); restoring it would
     // propagate the leak.
     //
@@ -321,7 +321,7 @@ void ActionExecutor::revert(uint32_t pid) noexcept {
     if (a->prev_affinity_mask != 0ull) {
         (void)phyriad::hw::set_process_affinity(pid, default_affinity_mask_);
         std::fprintf(stdout,
-            "[Ayama] Revert: pid=%u -> mask=0x%llx (default; captured prev=0x%llx)\n",
+            "[Phynned] Revert: pid=%u -> mask=0x%llx (default; captured prev=0x%llx)\n",
             pid,
             static_cast<unsigned long long>(default_affinity_mask_),
             static_cast<unsigned long long>(a->prev_affinity_mask));
@@ -376,7 +376,7 @@ void ActionExecutor::revert_all() noexcept {
         if (a.prev_affinity_mask != 0ull) {
             (void)phyriad::hw::set_process_affinity(a.pid, default_affinity_mask_);
             std::fprintf(stdout,
-                "[Ayama] Revert: pid=%u -> mask=0x%llx "
+                "[Phynned] Revert: pid=%u -> mask=0x%llx "
                 "(default; captured prev=0x%llx)\n",
                 a.pid,
                 static_cast<unsigned long long>(default_affinity_mask_),
@@ -477,5 +477,5 @@ uint32_t ActionExecutor::active_count() const noexcept {
     return n_active_;
 }
 
-} // namespace ayama::action
+} // namespace phynned::action
 // Made with my soul - Swately <3

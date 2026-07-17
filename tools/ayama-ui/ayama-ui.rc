@@ -1,8 +1,0 @@
-// apps/ayama/tools/ayama-ui/ayama-ui.rc
-// Resource script — embeds the Windows manifest (UAC + DPI) into the .exe.
-//
-// Resource ID 1 (CREATEPROCESS_MANIFEST_RESOURCE_ID) is the conventional
-// slot Windows reads at process start to apply UAC + DPI + supportedOS.
-#include <windows.h>
-
-1 24 "ayama-ui.manifest"

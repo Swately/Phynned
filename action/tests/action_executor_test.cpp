@@ -1,4 +1,4 @@
-// apps/ayama/action/tests/action_executor_test.cpp
+// action/tests/action_executor_test.cpp
 // Test: ActionExecutor apply + revert logic.
 //
 // Verifies:
@@ -11,16 +11,16 @@
 //       Integration tests for that run as part of T5 in the live environment.
 //
 
-#include <ayama/action/ActionExecutor.hpp>
-#include <ayama/action/ActionLog.hpp>
-#include <ayama/policy/PolicyDecision.hpp>
+#include <phynned/action/ActionExecutor.hpp>
+#include <phynned/action/ActionLog.hpp>
+#include <phynned/policy/PolicyDecision.hpp>
 
 #include <cassert>
 #include <cstdio>
 
 int main() {
-    using namespace ayama::action;
-    using namespace ayama::policy;
+    using namespace phynned::action;
+    using namespace phynned::policy;
 
     // ── Test 1: ActionLogEntry POD ────────────────────────────────────────
     {

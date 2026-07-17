@@ -1,14 +1,14 @@
-// apps/ayama/core/tests/agent_idle_budget_test.cpp
+// core/tests/agent_idle_budget_test.cpp
 // Automated CI test covering idle budget cases (5s run instead of 24h —
 // sufficient to detect leaks/runaway CPU).
 //
-// T4 "Ayama no-op idle":     agent CPU% during idle ≤ 5% (CI margin).
+// T4 "Phynned no-op idle":     agent CPU% during idle ≤ 5% (CI margin).
 // T6 "Degradation-safe":     start() OK without admin → no crash → clean stop().
 // T9 "Resource budget":      ΔRSS during 5s idle < 10 MB.
 //
 // Does NOT validate real targets / ETW (requires admin + real processes) —
 // only the base agent loop and its resource footprint.
-#include <ayama/core/AgentRuntime.hpp>
+#include <phynned/core/AgentRuntime.hpp>
 #include <phyriad/tuning/WorkingSet.hpp>     // FR-19
 #include <phyriad/process/CurrentProcess.hpp> // FR-18
 
@@ -59,8 +59,8 @@ static int g_failures = 0;
 
 int main() {
     using namespace std::chrono_literals;
-    using ayama::core::AgentConfig;
-    using ayama::core::AgentRuntime;
+    using phynned::core::AgentConfig;
+    using phynned::core::AgentRuntime;
 
     std::printf("agent_idle_budget_test starting (pid=%u, %s)\n",
                 phyriad::proc::self_pid(), phyriad::proc::self_name());

@@ -1,22 +1,22 @@
 # add-defender-exclusion.ps1
-# Whitelists Ayama with Windows Defender to prevent false-positive blocks.
+# Whitelists Phynned with Windows Defender to prevent false-positive blocks.
 #
 # Why is this needed?
-#   Ayama binaries are unsigned (no commercial code-signing certificate yet).
+#   Phynned binaries are unsigned (no commercial code-signing certificate yet).
 #   Windows Defender / SmartScreen often flag unsigned executables that
 #   manipulate process affinity + spawn child processes as "potentially
-#   unwanted" — even though Ayama only calls Win32 APIs (no kernel driver,
+#   unwanted" — even though Phynned only calls Win32 APIs (no kernel driver,
 #   no code injection, no memory reads of other processes).
 #
 # What this script does:
 #   1. Resolves the directory containing this script (parent of /scripts/).
 #   2. Adds that directory as a Microsoft Defender exclusion path.
-#   3. Adds each Ayama executable as a Defender process exclusion.
-#   4. Adds %LOCALAPPDATA%\Ayama as an exclusion (config + audit logs).
+#   3. Adds each Phynned executable as a Defender process exclusion.
+#   4. Adds %LOCALAPPDATA%\Phynned as an exclusion (config + audit logs).
 #
 # What this script does NOT do:
 #   - Disable Defender (it remains active for everything else).
-#   - Whitelist arbitrary paths (only the Ayama install location).
+#   - Whitelist arbitrary paths (only the Phynned install location).
 #   - Touch Defender's network protection / cloud-delivered protection.
 #
 # Requirements:
@@ -51,55 +51,55 @@ if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# ── Resolve Ayama install directory ────────────────────────────────────────
+# ── Resolve Phynned install directory ────────────────────────────────────────
 # This script lives in <install>/scripts/. Walk up one level to find the
-# directory containing ayama-ui.exe.
+# directory containing phynned-ui.exe.
 $scriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ayamaRoot   = Split-Path -Parent $scriptDir
-$ayamaConfig = Join-Path $env:LOCALAPPDATA 'Ayama'
+$phynnedRoot   = Split-Path -Parent $scriptDir
+$phynnedConfig = Join-Path $env:LOCALAPPDATA 'Phynned'
 
-if (-not (Test-Path (Join-Path $ayamaRoot 'ayama-ui.exe'))) {
-    Write-Host "ERROR: ayama-ui.exe not found in $ayamaRoot" -ForegroundColor Red
+if (-not (Test-Path (Join-Path $phynnedRoot 'phynned-ui.exe'))) {
+    Write-Host "ERROR: phynned-ui.exe not found in $phynnedRoot" -ForegroundColor Red
     Write-Host "This script expects the layout: <install>/scripts/add-defender-exclusion.ps1" -ForegroundColor Yellow
-    Write-Host "                                <install>/ayama-ui.exe" -ForegroundColor Yellow
+    Write-Host "                                <install>/phynned-ui.exe" -ForegroundColor Yellow
     exit 1
 }
 
 # ── Executables to whitelist ───────────────────────────────────────────────
 $exeList = @(
-    (Join-Path $ayamaRoot 'ayama-ui.exe'),
-    (Join-Path $ayamaRoot 'runtime\ayama-agent.exe'),
-    (Join-Path $ayamaRoot 'runtime\ayama-cli.exe'),
-    (Join-Path $ayamaRoot 'runtime\ayama-bench.exe'),
-    (Join-Path $ayamaRoot 'runtime\ayama-service-register.exe')
+    (Join-Path $phynnedRoot 'phynned-ui.exe'),
+    (Join-Path $phynnedRoot 'runtime\phynned-agent.exe'),
+    (Join-Path $phynnedRoot 'runtime\phynned-cli.exe'),
+    (Join-Path $phynnedRoot 'runtime\phynned-bench.exe'),
+    (Join-Path $phynnedRoot 'runtime\phynned-service-register.exe')
 )
 
 # ── Apply or remove ────────────────────────────────────────────────────────
 if ($Remove) {
-    Write-Host "Removing Ayama exclusions from Windows Defender..." -ForegroundColor Cyan
-    try { Remove-MpPreference -ExclusionPath $ayamaRoot   -ErrorAction SilentlyContinue } catch {}
-    try { Remove-MpPreference -ExclusionPath $ayamaConfig -ErrorAction SilentlyContinue } catch {}
+    Write-Host "Removing Phynned exclusions from Windows Defender..." -ForegroundColor Cyan
+    try { Remove-MpPreference -ExclusionPath $phynnedRoot   -ErrorAction SilentlyContinue } catch {}
+    try { Remove-MpPreference -ExclusionPath $phynnedConfig -ErrorAction SilentlyContinue } catch {}
     foreach ($exe in $exeList) {
         try { Remove-MpPreference -ExclusionProcess $exe -ErrorAction SilentlyContinue } catch {}
     }
-    Write-Host "Done. Ayama no longer excluded from Defender scans." -ForegroundColor Green
+    Write-Host "Done. Phynned no longer excluded from Defender scans." -ForegroundColor Green
     exit 0
 }
 
-Write-Host "Adding Ayama exclusions to Windows Defender..." -ForegroundColor Cyan
-Write-Host "  Install path:  $ayamaRoot"  -ForegroundColor Gray
-Write-Host "  Config path:   $ayamaConfig" -ForegroundColor Gray
+Write-Host "Adding Phynned exclusions to Windows Defender..." -ForegroundColor Cyan
+Write-Host "  Install path:  $phynnedRoot"  -ForegroundColor Gray
+Write-Host "  Config path:   $phynnedConfig" -ForegroundColor Gray
 Write-Host ""
 
 # 1. Path exclusions (install dir + config dir)
-Add-MpPreference -ExclusionPath $ayamaRoot
-Write-Host "  [OK] Path excluded: $ayamaRoot" -ForegroundColor Green
+Add-MpPreference -ExclusionPath $phynnedRoot
+Write-Host "  [OK] Path excluded: $phynnedRoot" -ForegroundColor Green
 
-if (-not (Test-Path $ayamaConfig)) {
-    New-Item -ItemType Directory -Path $ayamaConfig -Force | Out-Null
+if (-not (Test-Path $phynnedConfig)) {
+    New-Item -ItemType Directory -Path $phynnedConfig -Force | Out-Null
 }
-Add-MpPreference -ExclusionPath $ayamaConfig
-Write-Host "  [OK] Path excluded: $ayamaConfig" -ForegroundColor Green
+Add-MpPreference -ExclusionPath $phynnedConfig
+Write-Host "  [OK] Path excluded: $phynnedConfig" -ForegroundColor Green
 
 # 2. Process exclusions (each .exe by name)
 foreach ($exe in $exeList) {
@@ -112,6 +112,6 @@ foreach ($exe in $exeList) {
 }
 
 Write-Host ""
-Write-Host "Done. Ayama is now excluded from real-time Defender scanning." -ForegroundColor Green
+Write-Host "Done. Phynned is now excluded from real-time Defender scanning." -ForegroundColor Green
 Write-Host "To undo: .\add-defender-exclusion.ps1 -Remove" -ForegroundColor Gray
 # Made with my soul - Swately <3

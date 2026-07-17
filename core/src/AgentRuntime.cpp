@@ -1,31 +1,31 @@
-// apps/ayama/core/src/AgentRuntime.cpp
+// core/src/AgentRuntime.cpp
 // AgentRuntime — implementation.
 //
 
-#include <ayama/core/AgentRuntime.hpp>
-#include <ayama/core/AdaptiveTick.hpp>
-#include <ayama/core/Diag.hpp>
-#include <ayama/core/SelfMonitor.hpp>
-#include <ayama/core/PowerWatch.hpp>
-#include <ayama/core/AutoRevertGuard.hpp>
-#include <ayama/core/InternalWatchdog.hpp>
-#include <ayama/core/IdleWatch.hpp>
-#include <ayama/observer/ProcessObserver.hpp>
-#include <ayama/observer/MetricsCollector.hpp>
-#include <ayama/observer/ProcessClassifier.hpp>
-#include <ayama/observer/KindOverrides.hpp>
-#include <ayama/observer/ForegroundWatcher.hpp>
-#include <ayama/observer/ClassificationCache.hpp>
-#include <ayama/observer/EtwProviderSet.hpp>
-#include <ayama/policy/PolicyEngine.hpp>
-#include <ayama/policy/AutoPolicySelector.hpp>
-#include <ayama/action/ActionExecutor.hpp>
-#include <ayama/action/AuditLog.hpp>
-#include <ayama/bench/ABRunner.hpp>
-#include <ayama/config/ConfigStore.hpp>
-#include <ayama/config/DefaultPolicyPack.hpp>
-#include <ayama/learn/PerGameMemory.hpp>
-#include <ayama/ipc/AyamaAgentPublisher.hpp>
+#include <phynned/core/AgentRuntime.hpp>
+#include <phynned/core/AdaptiveTick.hpp>
+#include <phynned/core/Diag.hpp>
+#include <phynned/core/SelfMonitor.hpp>
+#include <phynned/core/PowerWatch.hpp>
+#include <phynned/core/AutoRevertGuard.hpp>
+#include <phynned/core/InternalWatchdog.hpp>
+#include <phynned/core/IdleWatch.hpp>
+#include <phynned/observer/ProcessObserver.hpp>
+#include <phynned/observer/MetricsCollector.hpp>
+#include <phynned/observer/ProcessClassifier.hpp>
+#include <phynned/observer/KindOverrides.hpp>
+#include <phynned/observer/ForegroundWatcher.hpp>
+#include <phynned/observer/ClassificationCache.hpp>
+#include <phynned/observer/EtwProviderSet.hpp>
+#include <phynned/policy/PolicyEngine.hpp>
+#include <phynned/policy/AutoPolicySelector.hpp>
+#include <phynned/action/ActionExecutor.hpp>
+#include <phynned/action/AuditLog.hpp>
+#include <phynned/bench/ABRunner.hpp>
+#include <phynned/config/ConfigStore.hpp>
+#include <phynned/config/DefaultPolicyPack.hpp>
+#include <phynned/learn/PerGameMemory.hpp>
+#include <phynned/ipc/PhynnedAgentPublisher.hpp>
 
 #include <phyriad/topology/HardwareTopology.hpp>
 #include <phyriad/tuning/PrivilegeCheck.hpp>
@@ -50,7 +50,7 @@
 // getpid() replaced by phyriad::proc::self_pid() (FR-18)
 #endif
 
-namespace ayama::core {
+namespace phynned::core {
 
 // ── Diag storage (declared in Diag.hpp) ───────────────────────────────────
 // Updated by run() at each phase transition; read by main.cpp's unhandled
@@ -64,8 +64,8 @@ namespace diag {
 }
 
 // Local helper macro — sets g_last_phase with relaxed store.
-#define AYAMA_PHASE(P) \
-    ::ayama::core::diag::g_last_phase.store(static_cast<uint32_t>(P), \
+#define PHYNNED_PHASE(P) \
+    ::phynned::core::diag::g_last_phase.store(static_cast<uint32_t>(P), \
                                             std::memory_order_relaxed)  // HAL: relaxed — secondary atomic in compound op
 
 // ── Auto-discover blacklist ────────────────────────────────────
@@ -77,7 +77,7 @@ namespace diag {
 // garbage.
 //
 // Bug seen in agent_hot_thread_v2.log:
-//   [Ayama] Auto-discovered foreground game: explorer.exe (PID 2692) — pattern registered
+//   [Phynned] Auto-discovered foreground game: explorer.exe (PID 2692) — pattern registered
 //
 // Case-insensitive exact-match on the basename. Keep the list to clear
 // OS shell processes only; debatable cases (Taskmgr, WindowsTerminal,
@@ -161,7 +161,7 @@ static void apply_self_pin(const phyriad::HardwareTopology& topo) noexcept {
             const DWORD_PTR mask = static_cast<DWORD_PTR>(1ull) << c.logical_id;
             SetThreadAffinityMask(GetCurrentThread(), mask);
             std::fprintf(stdout,
-                "[Ayama] Self-pinned to E-core %u (logical)\n", c.logical_id);
+                "[Phynned] Self-pinned to E-core %u (logical)\n", c.logical_id);
             return;
         }
     }
@@ -177,7 +177,7 @@ static void apply_self_pin(const phyriad::HardwareTopology& topo) noexcept {
                 const DWORD_PTR mask = static_cast<DWORD_PTR>(1ull) << c.logical_id;
                 SetThreadAffinityMask(GetCurrentThread(), mask);
                 std::fprintf(stdout,
-                    "[Ayama] Self-pinned to non-V-Cache core %u\n", c.logical_id);
+                    "[Phynned] Self-pinned to non-V-Cache core %u\n", c.logical_id);
                 return;
             }
         }
@@ -189,7 +189,7 @@ static void apply_self_pin(const phyriad::HardwareTopology& topo) noexcept {
         const DWORD_PTR mask = static_cast<DWORD_PTR>(1ull) << last;
         SetThreadAffinityMask(GetCurrentThread(), mask);
         std::fprintf(stdout,
-            "[Ayama] Self-pinned to last core %u (fallback)\n", last);
+            "[Phynned] Self-pinned to last core %u (fallback)\n", last);
     }
 #else
     (void)topo;
@@ -207,7 +207,7 @@ static void apply_memory_budget() noexcept {
     if (!r.has_value()) {
         // Non-fatal: log and continue.  Likely PermissionDenied on restricted CI.
         std::fprintf(stdout,
-            "[Ayama] Working-set hint skipped (code=%u) — continuing.\n",
+            "[Phynned] Working-set hint skipped (code=%u) — continuing.\n",
             static_cast<unsigned>(r.error().code));
     }
 }
@@ -262,7 +262,7 @@ struct AgentRuntime::Impl {
     bench::ABRunner                 ab_runner{};   // controlled via IPC commands
 
     // ── SHM publisher ─────────────────────────────────────────────────────
-    ipc::AyamaAgentPublisher        publisher{};   // write side of shared memory
+    ipc::PhynnedAgentPublisher        publisher{};   // write side of shared memory
 
     // ── Persistent audit trail (§9.1) ─────────────────────────────────────
     action::AuditLog                audit_log{};
@@ -316,11 +316,11 @@ struct AgentRuntime::Impl {
     // future apply() steps are skipped. UI sets via send_command(kPause).
     // Default: PAUSED. The agent never applies
     // optimisations on its own; the operator (UI Start button, or
-    // `ayama-cli resume`, or the agent launched with --start-active) must
+    // `phynned-cli resume`, or the agent launched with --start-active) must
     // explicitly opt in. This prevents the surprise case where a user
-    // tries Ayama out of curiosity while a kernel-anticheat game is
+    // tries Phynned out of curiosity while a kernel-anticheat game is
     // running and gets flagged by the AC for the OS-level affinity
-    // changes Ayama would otherwise have made on startup.
+    // changes Phynned would otherwise have made on startup.
     bool     policies_paused        {true};
     uint64_t last_cmd_seq_processed {0ull};
 
@@ -373,11 +373,11 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         if (!impl_->is_admin) {
             if (impl_->cfg.require_admin) {
                 std::fprintf(stderr,
-                    "[Ayama] Admin required but not available. Exiting.\n");
+                    "[Phynned] Admin required but not available. Exiting.\n");
                 return std::unexpected(phyriad::Error{phyriad::ErrorCode::PermissionDenied});
             }
             std::fprintf(stdout,
-                "[Ayama] WARNING: Not admin. ETW and affinity operations disabled.\n"
+                "[Phynned] WARNING: Not admin. ETW and affinity operations disabled.\n"
                 "         Launch as Administrator for full functionality.\n");
         }
     }
@@ -387,11 +387,11 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         auto cfg_result = config::ConfigStore::load_policies();
         if (cfg_result.has_value()) {
             impl_->agent_cfg = *cfg_result;
-            std::fprintf(stdout, "[Ayama] Config loaded: op_mode=%u, %u rule overrides.\n",
+            std::fprintf(stdout, "[Phynned] Config loaded: op_mode=%u, %u rule overrides.\n",
                 static_cast<unsigned>(impl_->agent_cfg.op_mode),
                 impl_->agent_cfg.n_overrides);
         } else {
-            std::fprintf(stdout, "[Ayama] No policies.toml found — using defaults.\n");
+            std::fprintf(stdout, "[Phynned] No policies.toml found — using defaults.\n");
         }
     }
 
@@ -404,7 +404,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         const uint32_t expired = impl_->per_game.expire_stale_entries(30u);
 
         std::fprintf(stdout,
-            "[Ayama] Hardware: %s  Per-game: %u entries  Bad: %u  Expired: %u\n",
+            "[Phynned] Hardware: %s  Per-game: %u entries  Bad: %u  Expired: %u\n",
             impl_->per_game.hardware_id(),
             impl_->per_game.count(),
             impl_->per_game.bad_count(),
@@ -421,11 +421,11 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
 
         // §9.2 AutoPolicySelector: classify CPU and pre-compute affinity masks.
         impl_->auto_selector.init_from_topology(topo);
-        std::fprintf(stdout, "[Ayama] CPU class: %s\n",
+        std::fprintf(stdout, "[Phynned] CPU class: %s\n",
             impl_->auto_selector.class_name());
 
         // §5.3 Default policy pack: write hardware-appropriate policies.toml
-        // on first run so users can inspect / edit what Ayama will do.
+        // on first run so users can inspect / edit what Phynned will do.
         (void)config::DefaultPolicyPack::write_if_missing(topo);
     }
 
@@ -524,7 +524,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
             impl_->observer.add_target_pattern(p);
         }
         std::fprintf(stdout,
-            "[Ayama] Observer patterns registered: %zu seed entries.\n",
+            "[Phynned] Observer patterns registered: %zu seed entries.\n",
             sizeof(kSeedPatterns) / sizeof(kSeedPatterns[0]));
     }
 
@@ -541,11 +541,11 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
     if (impl_->cfg.start_active) {
         impl_->policies_paused = false;
         std::fprintf(stdout,
-            "[Ayama] --start-active: policies APPLY at startup (no UI gate).\n");
+            "[Phynned] --start-active: policies APPLY at startup (no UI gate).\n");
     } else {
         std::fprintf(stdout,
-            "[Ayama] Safe-default: policies PAUSED. Awaiting UI Start "
-            "or `ayama-cli resume`.\n");
+            "[Phynned] Safe-default: policies PAUSED. Awaiting UI Start "
+            "or `phynned-cli resume`.\n");
     }
 
     // ── Manual TargetKind overrides (UI-editable file) ───────────────────
@@ -558,7 +558,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         impl_->classifier.set_overrides(&impl_->overrides);
         if (n_loaded > 0u) {
             std::fprintf(stdout,
-                "[Ayama] Loaded %u manual kind override(s).\n", n_loaded);
+                "[Phynned] Loaded %u manual kind override(s).\n", n_loaded);
         }
     }
 
@@ -582,7 +582,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
     // Auto-reset event; signal() in stop()/watchdog wakes the run() loop early.
     impl_->wake_event = phyriad::hal::WakeEvent::create();
     if (!impl_->wake_event.has_value()) {
-        std::fprintf(stderr, "[Ayama] WakeEvent::create() failed — fatal.\n");
+        std::fprintf(stderr, "[Phynned] WakeEvent::create() failed — fatal.\n");
         return std::unexpected(phyriad::Error{phyriad::ErrorCode::SystemError});
     }
 
@@ -602,7 +602,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         auto pub_result = impl_->publisher.open(impl_->cfg.shm_name, agent_pid);
         if (!pub_result) {
             std::fprintf(stderr,
-                "[Ayama] WARNING: SHM publish failed — UI clients will not connect.\n");
+                "[Phynned] WARNING: SHM publish failed — UI clients will not connect.\n");
             // Non-fatal: agent continues without UI
         } else {
             // Publish detected hardware classification (one-shot; static for
@@ -640,7 +640,7 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
     });
 
     phyriad::hal::seq_store_release(impl_->running, true);
-    std::fprintf(stdout, "[Ayama] Agent started. Admin=%s ETW=%s TSC=%.1f GHz\n",
+    std::fprintf(stdout, "[Phynned] Agent started. Admin=%s ETW=%s TSC=%.1f GHz\n",
         impl_->is_admin ? "yes" : "no",
         impl_->etw_active ? "yes" : "no",
         static_cast<double>(impl_->tsc_freq) / 1e9);
@@ -660,37 +660,37 @@ void AgentRuntime::run() noexcept {
         const uint32_t tick_n =
             phyriad::hal::stat_fetch_add_relaxed(impl_->tick_count, 1u) + 1u;
         phyriad::hal::stat_store_relaxed(diag::g_last_tick, tick_n);
-        AYAMA_PHASE(diag::PhaseTickStart);
+        PHYNNED_PHASE(diag::PhaseTickStart);
         const uint64_t now_tsc = phyriad::hal::rdtsc();
 
         // ── IPC command processing ─────────────────
-        AYAMA_PHASE(diag::PhaseIpcCommand);
+        PHYNNED_PHASE(diag::PhaseIpcCommand);
         // Poll the SHM command slot. If a new command arrived (seq changed),
         // dispatch it and bump ack so the client can observe completion.
         if (impl_->publisher.is_open()) {
-            ipc::AyamaCommandSlot* cmd_slot = impl_->publisher.command_slot();
+            ipc::PhynnedCommandSlot* cmd_slot = impl_->publisher.command_slot();
             if (cmd_slot) {
                 const uint64_t cur_seq =
                     phyriad::hal::seq_load_acquire(cmd_slot->seq);
                 if (cur_seq != impl_->last_cmd_seq_processed) {
                     const uint32_t kind = cmd_slot->cmd_kind;
                     switch (kind) {
-                        case ipc::kAyamaCmdPausePolicies:
+                        case ipc::kPhynnedCmdPausePolicies:
                             impl_->executor.revert_all();
                             impl_->policies_paused = true;
                             impl_->publisher.set_policies_paused(1u);
                             std::fprintf(stdout,
-                                "[Ayama][IPC] policies PAUSED (seq=%llu)\n",
+                                "[Phynned][IPC] policies PAUSED (seq=%llu)\n",
                                 static_cast<unsigned long long>(cur_seq));
                             break;
-                        case ipc::kAyamaCmdResumePolicies:
+                        case ipc::kPhynnedCmdResumePolicies:
                             impl_->policies_paused = false;
                             impl_->publisher.set_policies_paused(0u);
                             std::fprintf(stdout,
-                                "[Ayama][IPC] policies RESUMED (seq=%llu)\n",
+                                "[Phynned][IPC] policies RESUMED (seq=%llu)\n",
                                 static_cast<unsigned long long>(cur_seq));
                             break;
-                        case ipc::kAyamaCmdForceRevertAll:
+                        case ipc::kPhynnedCmdForceRevertAll:
                             impl_->executor.revert_all();
                             // Match the user expectation: "Reset" clears
                             // active policies AND leaves the agent paused
@@ -700,10 +700,10 @@ void AgentRuntime::run() noexcept {
                             impl_->policies_paused = true;
                             impl_->publisher.set_policies_paused(1u);
                             std::fprintf(stdout,
-                                "[Ayama][IPC] force-revert-all (seq=%llu)\n",
+                                "[Phynned][IPC] force-revert-all (seq=%llu)\n",
                                 static_cast<unsigned long long>(cur_seq));
                             break;
-                        case ipc::kAyamaCmdSetDifferentialPin: {
+                        case ipc::kPhynnedCmdSetDifferentialPin: {
                             // UI-controlled toggle.
                             // arg1 is bool (0/1); revert any active actions
                             // so the next policy cycle re-applies under the
@@ -719,7 +719,7 @@ void AgentRuntime::run() noexcept {
                                 // revert_all() + re-apply churn, which races
                                 // against the next tick's evaluation.
                                 std::fprintf(stdout,
-                                    "[Ayama][IPC] differential-pin already %s "
+                                    "[Phynned][IPC] differential-pin already %s "
                                     "(seq=%llu, no-op)\n",
                                     enable ? "ENABLED" : "DISABLED",
                                     static_cast<unsigned long long>(cur_seq));
@@ -727,7 +727,7 @@ void AgentRuntime::run() noexcept {
                                 impl_->executor.revert_all();
                                 impl_->policy_engine.set_differential_pin_enabled(enable);
                                 std::fprintf(stdout,
-                                    "[Ayama][IPC] differential-pin mode %s "
+                                    "[Phynned][IPC] differential-pin mode %s "
                                     "(seq=%llu, reverted active policies)\n",
                                     enable ? "ENABLED" : "DISABLED",
                                     static_cast<unsigned long long>(cur_seq));
@@ -745,14 +745,14 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── Power check (every kPowerCheckInterval ticks) ─────────────────
-        AYAMA_PHASE(diag::PhasePowerCheck);
+        PHYNNED_PHASE(diag::PhasePowerCheck);
         if (++impl_->power_check_counter >= Impl::kPowerCheckInterval) {
             impl_->power_check_counter = 0u;
             impl_->power_watch.refresh();
         }
 
         // ── Idle check → DeepIdle transition ─────────────────────────────
-        AYAMA_PHASE(diag::PhaseIdleCheck);
+        PHYNNED_PHASE(diag::PhaseIdleCheck);
         if (++impl_->idle_check_counter >= Impl::kIdleCheckInterval) {
             impl_->idle_check_counter = 0u;
             if (impl_->n_targets == 0u && impl_->idle_watch.desktop_idle_5min()) {
@@ -761,7 +761,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── ForegroundWatcher tick ────────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseForegroundTick);
+        PHYNNED_PHASE(diag::PhaseForegroundTick);
         const uint32_t sleep_ms_prev = tick_interval_ms(
             impl_->workload_state,
             impl_->power_watch.on_battery());
@@ -770,7 +770,7 @@ void AgentRuntime::run() noexcept {
         // ── Foreground-heuristic auto-discovery ────────
         // The seed pattern list in ProcessObserver covers ~40 well-known exe
         // names. Anything else (Unity games with unique names, indie titles,
-        // less-mainstream AAA) is INVISIBLE to Ayama because the observer
+        // less-mainstream AAA) is INVISIBLE to Phynned because the observer
         // filters by pattern before the classifier ever sees the process.
         //
         // Fix: every kAutoDiscoverInterval ticks, examine the foreground PID.
@@ -782,7 +782,7 @@ void AgentRuntime::run() noexcept {
         // Probe gate: we cache the last-probed PID + TSC so we don't re-probe
         // the same foreground PID every second. Only re-probe after 30 s OR
         // when the foreground PID changes (alt-tab to a different process).
-        AYAMA_PHASE(diag::PhaseAutoDiscover);
+        PHYNNED_PHASE(diag::PhaseAutoDiscover);
         if (++impl_->auto_discover_counter >= Impl::kAutoDiscoverInterval) {
             impl_->auto_discover_counter = 0u;
             const uint32_t fg_pid = impl_->fg_watcher.foreground_pid();
@@ -809,7 +809,7 @@ void AgentRuntime::run() noexcept {
                         && impl_->fg_watcher.is_foreground_fullscreen())
                     {
                         // check_d3d_vk_modules opens process with PROCESS_VM_READ —
-                        // strongest access right used by Ayama. Anti-cheat-protected
+                        // strongest access right used by Phynned. Anti-cheat-protected
                         // games may deny this; we silently skip those.
                         const bool is_game = impl_->classifier
                             .check_d3d_vk_modules(fg_pid);
@@ -829,7 +829,7 @@ void AgentRuntime::run() noexcept {
                                 if (!is_os_shell_process(exe_name)) {
                                     impl_->observer.add_target_pattern(exe_name);
                                     std::fprintf(stdout,
-                                        "[Ayama] Auto-discovered foreground game: "
+                                        "[Phynned] Auto-discovered foreground game: "
                                         "%s (PID %u) — pattern registered\n",
                                         exe_name, fg_pid);
                                 }
@@ -841,7 +841,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 1. Enumerate targets ──────────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseProcessRefresh);
+        PHYNNED_PHASE(diag::PhaseProcessRefresh);
         // refresh() is the #2 hot path
         // (CreateToolhelp32Snapshot of 200-400 system processes, ~2-3 ms).
         // Throttled to every kProcessRefreshInterval ticks. snapshot() is cheap
@@ -880,7 +880,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 2. Sample metrics ─────────────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseMetricsSample);
+        PHYNNED_PHASE(diag::PhaseMetricsSample);
         if (impl_->n_targets > 0u) {
             uint32_t pids[observer::kMaxTargets];
             for (uint32_t i = 0u; i < impl_->n_targets; ++i)
@@ -891,7 +891,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 3. Classify targets + update TargetProcess::kind ─────────────
-        AYAMA_PHASE(diag::PhaseClassify);
+        PHYNNED_PHASE(diag::PhaseClassify);
         // The classification loop builds ProcessInfo
         // per-target every tick (foreground watcher × 3 calls, strncpy,
         // check_d3d_vk_modules cache scan, classify_cached). With n=64 targets
@@ -973,7 +973,7 @@ void AgentRuntime::run() noexcept {
                     tm.hot_tid != s_last_logged_hot_tid[i])
                 {
                     std::fprintf(stdout,
-                        "[Ayama][HotThread] %-32s [pid=%u] "
+                        "[Phynned][HotThread] %-32s [pid=%u] "
                         "hot_tid=%u (was %u)\n",
                         tp.name, tp.pid,
                         tm.hot_tid, s_last_logged_hot_tid[i]);
@@ -983,7 +983,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 4. Classify workload state ────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseWorkloadState);
+        PHYNNED_PHASE(diag::PhaseWorkloadState);
         if (impl_->n_targets == 0u) {
             // Maintain DeepIdle if idle was already triggered; otherwise Idle.
             if (impl_->workload_state != WorkloadState::DeepIdle) {
@@ -995,7 +995,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 4b. Dynamic ETW tier update (§4.5) ───────────────────────────
-        AYAMA_PHASE(diag::PhaseEtwTierUpdate);
+        PHYNNED_PHASE(diag::PhaseEtwTierUpdate);
         if (impl_->is_admin) {
             const observer::EtwProviderSet desired =
                 observer::provider_set_for(impl_->workload_state);
@@ -1004,7 +1004,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 5. Evaluate policies ──────────────────────────────────────────
-        AYAMA_PHASE(diag::PhasePolicyEvaluate);
+        PHYNNED_PHASE(diag::PhasePolicyEvaluate);
         if (impl_->n_targets > 0u) {
             // ── 5a. AutoPolicySelector: per-game memory shortcut (§9.2/9.3) ─
             // For targets with a fresh PerGameMemory entry, inject decisions
@@ -1076,7 +1076,7 @@ void AgentRuntime::run() noexcept {
             }
 
             // ── 6. Apply decisions ────────────────────────────────────────
-            AYAMA_PHASE(diag::PhaseApplyDecisions);
+            PHYNNED_PHASE(diag::PhaseApplyDecisions);
             // Skip apply when policies are paused via IPC.
             // PolicyEngine still evaluates (so UI can see what WOULD be
             // applied), but executor.apply() is skipped. Existing actions
@@ -1151,7 +1151,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 6b. Persist new action entries to audit.bin (§9.1) ───────────
-        AYAMA_PHASE(diag::PhaseAuditDrain);
+        PHYNNED_PHASE(diag::PhaseAuditDrain);
         if (impl_->audit_log.is_open()) {
             impl_->audit_log.drain_and_write(
                 impl_->executor.action_log(),
@@ -1159,7 +1159,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── 7. Publish to SHM ─────────────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseShmPublish);
+        PHYNNED_PHASE(diag::PhaseShmPublish);
         if (impl_->publisher.is_open()) {
             // Compute aggregate stats from metrics_buf.
             uint32_t total_migrations = 0u;
@@ -1207,7 +1207,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── Self-monitor (every kSelfMonitorInterval ticks) ───────────────
-        AYAMA_PHASE(diag::PhaseSelfMonitor);
+        PHYNNED_PHASE(diag::PhaseSelfMonitor);
         if (++impl_->self_monitor_counter >= Impl::kSelfMonitorInterval) {
             impl_->self_monitor_counter = 0u;
             const float tick_ms = static_cast<float>(tick_interval_ms(
@@ -1223,7 +1223,7 @@ void AgentRuntime::run() noexcept {
         }
 
         // ── Adaptive sleep (FR-16) ────────────────────────────────────────
-        AYAMA_PHASE(diag::PhaseWakeWait);
+        PHYNNED_PHASE(diag::PhaseWakeWait);
         // WakeEvent::wait() blocks until timeout OR stop()/watchdog signals it.
         // Auto-reset: the signal is consumed by this wait, no manual reset.
         const uint32_t sleep_ms = tick_interval_ms(
@@ -1256,7 +1256,7 @@ void AgentRuntime::run() noexcept {
 
     phyriad::hal::seq_store_release(impl_->running, false);
 
-    std::fprintf(stdout, "[Ayama] Agent stopped after %u ticks.\n",
+    std::fprintf(stdout, "[Phynned] Agent stopped after %u ticks.\n",
         phyriad::hal::stat_load_relaxed(impl_->tick_count));
 }
 
@@ -1288,5 +1288,5 @@ bool AgentRuntime::etw_active() const noexcept {
     return impl_ && impl_->etw_active;
 }
 
-} // namespace ayama::core
+} // namespace phynned::core
 // Made with my soul - Swately <3

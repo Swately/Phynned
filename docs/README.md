@@ -1,6 +1,6 @@
-# Ayama empirical V-Cache study
+# Phynned empirical V-Cache study
 
-This folder holds Ayama's empirical study: the test protocol and the per-game
+This folder holds Phynned's empirical study: the test protocol and the per-game
 A/B benchmark reports that measure what happens to game frame-time when a
 CPU-bound game is **pinned to the V-Cache CCD** of an AMD Ryzen 9 7950X3D (and
 the analogous policies for Intel hybrid / multi-CCD parts).
@@ -12,13 +12,13 @@ and it is easily misread, so please read the scope notes below.
 
 ## What this study is
 
-- **CPU-affinity tuning via documented OS APIs.** The only thing Ayama does to
+- **CPU-affinity tuning via documented OS APIs.** The only thing Phynned does to
   a game is set its CPU affinity (`SetProcessAffinityMask` on Windows) so the
   game's threads land on the V-Cache CCD. This is the same class of operation
   as Process Lasso or Task Manager's "Set affinity." **There is no code
   injection, no memory hooking, no reading or writing of another process's
   memory, and no driver.**
-- **An honest A/B/A/B/A protocol.** Each test alternates Baseline (Ayama
+- **An honest A/B/A/B/A protocol.** Each test alternates Baseline (Phynned
   observing only, no policy) and Treated (policy active) phases on the same
   reproducible scenario, computes confidence intervals, and **reports null
   results as null** when the intervals overlap. See
@@ -32,7 +32,7 @@ and it is easily misread, so please read the scope notes below.
   risk, not to circumvent them. The anti-cheat mentions in these documents are
   about *which games are excluded*, never about defeating anything. Every game
   measured here has no kernel anti-cheat in the tested mode.
-- **Not a universal "Ayama makes games faster" claim.** The reports show the
+- **Not a universal "Phynned makes games faster" claim.** The reports show the
   effect is real and meaningful on some titles (CPU-bound, cross-CCD-sensitive
   engines) and **statistically null on others** (well-threaded or GPU-bound
   engines). The honest, mixed result is the point.
@@ -75,4 +75,4 @@ and it is easily misread, so please read the scope notes below.
 > *gamma* era and predates the `v0.1.0-experimental` reset. It is evidence of
 > method and findings, not a current product claim. The project's planning
 > archive ([`docs/plans/history/`](plans/history/)) cross-references
-> this study as the empirical basis for Ayama's design.
+> this study as the empirical basis for Phynned's design.

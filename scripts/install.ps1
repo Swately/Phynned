@@ -5,7 +5,7 @@
 #   OR from PowerShell:
 #     .\install.ps1                # default install
 #     .\install.ps1 -Force         # reinstall over existing
-#     .\install.ps1 -InstallDir C:\Tools\Ayama  # custom location
+#     .\install.ps1 -InstallDir C:\Tools\Phynned  # custom location
 #
 # Requirements:
 #   - Windows 10 build 19041+ or Windows 11
@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [string]$InstallDir = "$env:LOCALAPPDATA\Ayama",
+    [string]$InstallDir = "$env:LOCALAPPDATA\Phynned",
     [switch]$NoPath,
     [switch]$NoStartMenu,
     [string]$PresentMonUrl = "https://github.com/GameTechDev/PresentMon/releases/download/v2.4.1/PresentMon-2.4.1-x64.exe"
@@ -31,7 +31,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
 
 if (-not $isAdmin) {
     Write-Host ""
-    Write-Host "Ayama requires Administrator privileges to:" -ForegroundColor Yellow
+    Write-Host "Phynned requires Administrator privileges to:" -ForegroundColor Yellow
     Write-Host "  - Open ETW sessions for context-switch tracking"
     Write-Host "  - Set cross-process CPU affinity"
     Write-Host ""
@@ -41,7 +41,7 @@ if (-not $isAdmin) {
     exit 2
 }
 
-Write-Host "===== Ayama installer =====" -ForegroundColor Cyan
+Write-Host "===== Phynned installer =====" -ForegroundColor Cyan
 Write-Host "Install dir: $InstallDir"
 Write-Host ""
 
@@ -54,7 +54,7 @@ if ((Test-Path $InstallDir) -and (Get-ChildItem $InstallDir -ErrorAction Silentl
 }
 
 # Stop any running agent/ui before overwriting binaries
-foreach ($procName in @("ayama-agent", "ayama-ui", "ayama-cli")) {
+foreach ($procName in @("phynned-agent", "phynned-ui", "phynned-cli")) {
     $running = Get-Process -Name $procName -ErrorAction SilentlyContinue
     if ($running) {
         Write-Host "Stopping running $procName (PID $($running.Id))..."
@@ -130,16 +130,16 @@ if (-not $NoPath) {
 # ── 7. Start menu shortcut ────────────────────────────────────────────────────
 if (-not $NoStartMenu) {
     $startMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-    $lnkPath = "$startMenuDir\Ayama.lnk"
+    $lnkPath = "$startMenuDir\Phynned.lnk"
 
-    $uiExe = Join-Path $InstallDir "ayama-ui.exe"
+    $uiExe = Join-Path $InstallDir "phynned-ui.exe"
     if (Test-Path $uiExe) {
         $wshell = New-Object -ComObject WScript.Shell
         $shortcut = $wshell.CreateShortcut($lnkPath)
         $shortcut.TargetPath = $uiExe
         $shortcut.WorkingDirectory = $InstallDir
         $shortcut.IconLocation = $uiExe
-        $shortcut.Description = "Ayama — built on Phyriad Framework"
+        $shortcut.Description = "Phynned — built on Phyriad Framework"
         $shortcut.Save()
         Write-Host "Start menu shortcut created."
     }
@@ -147,7 +147,7 @@ if (-not $NoStartMenu) {
 
 # ── 8. Verify install ─────────────────────────────────────────────────────────
 $installed = @()
-foreach ($name in @("ayama-agent.exe", "ayama-ui.exe", "ayama-cli.exe")) {
+foreach ($name in @("phynned-agent.exe", "phynned-ui.exe", "phynned-cli.exe")) {
     $p = Join-Path $InstallDir $name
     if (Test-Path $p) { $installed += $name }
 }
@@ -160,8 +160,8 @@ $dur = ((Get-Date) - $installerStart).TotalSeconds
 Write-Host ("Total time:  {0:N1} s" -f $dur)
 Write-Host ""
 Write-Host "To launch:" -ForegroundColor Cyan
-Write-Host "  - Start menu -> Ayama, OR"
-Write-Host "  - Open a new terminal and type:  ayama-ui"
+Write-Host "  - Start menu -> Phynned, OR"
+Write-Host "  - Open a new terminal and type:  phynned-ui"
 Write-Host ""
 Write-Host "To uninstall:" -ForegroundColor Cyan
 Write-Host "  Remove-Item -Recurse '$InstallDir'"

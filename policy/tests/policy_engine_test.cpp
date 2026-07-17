@@ -1,4 +1,4 @@
-// apps/ayama/policy/tests/policy_engine_test.cpp
+// policy/tests/policy_engine_test.cpp
 // Test: PolicyEngine rule evaluation.
 //
 // Verifies:
@@ -8,18 +8,18 @@
 //   - Rule enable/disable.
 //
 
-#include <ayama/policy/PolicyEngine.hpp>
-#include <ayama/policy/Rule.hpp>
-#include <ayama/observer/TargetProcess.hpp>
-#include <ayama/observer/TargetMetrics.hpp>
+#include <phynned/policy/PolicyEngine.hpp>
+#include <phynned/policy/Rule.hpp>
+#include <phynned/observer/TargetProcess.hpp>
+#include <phynned/observer/TargetMetrics.hpp>
 
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 
 int main() {
-    using namespace ayama::policy;
-    using namespace ayama::observer;
+    using namespace phynned::policy;
+    using namespace phynned::observer;
 
     // ── Test 1: PolicyDecision POD ────────────────────────────────────────
     {

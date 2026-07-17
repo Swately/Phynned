@@ -1,4 +1,4 @@
-// apps/ayama/core/tests/agent_runtime_test.cpp
+// core/tests/agent_runtime_test.cpp
 // Test T4 (partial): AgentRuntime lifecycle — start, 100 ticks, stop.
 //
 // Verifies:
@@ -8,7 +8,7 @@
 //   - No crash, no memory leak (address sanitizer friendly).
 //
 
-#include <ayama/core/AgentRuntime.hpp>
+#include <phynned/core/AgentRuntime.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -20,8 +20,8 @@ int main() {
 
     // ── Test 1: AdaptiveTick constants ────────────────────────────────────
     {
-        using ayama::core::WorkloadState;
-        using ayama::core::tick_interval_ms;
+        using phynned::core::WorkloadState;
+        using phynned::core::tick_interval_ms;
 
         assert(tick_interval_ms(WorkloadState::DeepIdle, false) == 5000u);
         assert(tick_interval_ms(WorkloadState::Idle,     false) == 1000u);
@@ -35,12 +35,12 @@ int main() {
 
     // ── Test 2: Runtime lifecycle ─────────────────────────────────────────
     {
-        ayama::core::AgentConfig cfg{};
+        phynned::core::AgentConfig cfg{};
         cfg.require_admin         = false;  // degrade gracefully
         cfg.self_pin_to_slow_cores = false; // avoid test env side effects
         cfg.enable_shm_publish    = false;  // no SHM in unit test
 
-        ayama::core::AgentRuntime runtime(cfg);
+        phynned::core::AgentRuntime runtime(cfg);
 
         // start() must not fail even without admin
         auto r = runtime.start();
@@ -71,13 +71,13 @@ int main() {
 
     // ── Test 3: Multiple start/stop cycles ───────────────────────────────
     {
-        ayama::core::AgentConfig cfg{};
+        phynned::core::AgentConfig cfg{};
         cfg.require_admin = false;
         cfg.enable_shm_publish = false;
         cfg.self_pin_to_slow_cores = false;
 
         for (int i = 0; i < 3; ++i) {
-            ayama::core::AgentRuntime runtime(cfg);
+            phynned::core::AgentRuntime runtime(cfg);
             auto r = runtime.start();
             assert(r.has_value());
             std::thread t([&runtime]() { runtime.run(); });

@@ -1,11 +1,11 @@
-// apps/ayama/bench/tests/baseline_test.cpp
+// bench/tests/baseline_test.cpp
 // Test: Baseline push_sample, summary statistics, capacity enforcement.
 //
 // Does NOT require admin or a running process. All inputs are synthetic.
 //
 
-#include <ayama/bench/Baseline.hpp>
-#include <ayama/observer/TargetMetrics.hpp>
+#include <phynned/bench/Baseline.hpp>
+#include <phynned/observer/TargetMetrics.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -16,8 +16,8 @@ static bool near(float a, float b, float eps = 0.01f) {
 }
 
 int main() {
-    using namespace ayama::bench;
-    using namespace ayama::observer;
+    using namespace phynned::bench;
+    using namespace phynned::observer;
 
     // ── Test 1: POD sizes ────────────────────────────────────────────────────
     {

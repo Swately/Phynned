@@ -1,17 +1,17 @@
-<!-- NOTE 2026-07-15: this is the AYAMA INSTANCE (the [V1] lived source) of the general
+<!-- NOTE 2026-07-15: this is the PHYNNED INSTANCE (the [V1] lived source) of the general
 method now formalized at protocols/quality/EMPIRICAL_TEST_PROTOCOL.md. This doc stays the
-ayama-specific instrument (scenarios, PresentMon, bench runner, pitfalls); the general
+phynned-specific instrument (scenarios, PresentMon, bench runner, pitfalls); the general
 protocol is what other projects instantiate. -->
 
-# Ayama — Empirical Test Protocol
+# Phynned — Empirical Test Protocol
 
-Procedimiento reproducible para validar empíricamente las policies de Ayama
+Procedimiento reproducible para validar empíricamente las policies de Phynned
 contra un workload real. **Este es el work-flow oficial** que produce los
-reportes de `docs/ayama/reports/`.
+reportes de `docs/phynned/reports/`.
 
 **Version:** 2.0 (post-UI bench runner + 9 validated reports).
 **DoD relacionado:** `AYAMA_MASTER_PLAN.md §8.6` item #3.
-**Evidencia acumulada:** ver `docs/ayama/reports/EMPIRICAL_EVIDENCE_SUMMARY.md`.
+**Evidencia acumulada:** ver `docs/phynned/reports/EMPIRICAL_EVIDENCE_SUMMARY.md`.
 
 > **v2.0 changes**: 5-run A/B/A/B/A protocol (replaced 1-run A/B);
 > UI bench runner (replaced PowerShell + manual PresentMon); IPC
@@ -23,16 +23,16 @@ reportes de `docs/ayama/reports/`.
 ## §0 — Filosofía
 
 > "Toda métrica tiene baseline. No se reporta una mejora sin haber medido
-> el estado pre-Ayama." — Master Plan §0.4 regla #5.
+> el estado pre-Phynned." — Master Plan §0.4 regla #5.
 
 Cada test ejecuta DOS fases sobre el **mismo escenario reproducible**:
 
-- **Phase A (Baseline)**: Ayama corriendo pero **sin policies activas** (modo observe-only).
+- **Phase A (Baseline)**: Phynned corriendo pero **sin policies activas** (modo observe-only).
   Mide cómo se comporta el juego sin intervención.
-- **Phase B (Treated)**: Ayama corriendo con la policy correspondiente al hardware.
+- **Phase B (Treated)**: Phynned corriendo con la policy correspondiente al hardware.
   Mide el delta.
 
-La diferencia entre A y B es el valor real de Ayama. Si el delta no es
+La diferencia entre A y B es el valor real de Phynned. Si el delta no es
 estadísticamente significativo, se reporta como tal — honestidad antes que números.
 
 ---
@@ -45,10 +45,10 @@ estadísticamente significativo, se reporta como tal — honestidad antes que n�
   - **AMD X3D** (5800X3D, 7800X3D, 7950X3D, 9800X3D) → policy `PinGameToVCacheCcd`
   - **Intel hybrid** (12700K+, 13700K+, 14700K+) → policy `PinGameToPCores`
   - **AMD multi-CCD sin V-Cache** → policy `IsolateGameFromBackground`
-  - **Single-CCD homogénea** → control negativo (Ayama no actúa)
+  - **Single-CCD homogénea** → control negativo (Phynned no actúa)
 - RAM ≥ 16 GB, idealmente DDR5 para X3D / DDR4-3600+ para resto.
 - GPU con headroom suficiente para que el juego sea **CPU-bound** (no GPU-bound).
-  Si la GPU está al 100% no veremos beneficio de Ayama — el CPU ni se acerca al límite.
+  Si la GPU está al 100% no veremos beneficio de Phynned — el CPU ni se acerca al límite.
   **Antes de iniciar el A/B/A/B/A, verifica GPU% en RTSS/Afterburner según §7.3
   (objetivo 60-85% sostenido). El error metodológico #1 documentado en Reports 7
   vs 10 fue testear con GPU al 95% y declarar falso NULL.**
@@ -58,17 +58,17 @@ estadísticamente significativo, se reporta como tal — honestidad antes que n�
 | Pieza | Versión recomendada | Notas |
 |-------|---------------------|-------|
 | Windows | 10 22H2 o 11 23H2+ | Más nuevo = más providers ETW |
-| ayama-agent.exe | build actual del repo | Correr como Admin (UAC manual o servicio) |
+| phynned-agent.exe | build actual del repo | Correr como Admin (UAC manual o servicio) |
 | PresentMon | 2.x desde [github.com/GameTechDev/PresentMon](https://github.com/GameTechDev/PresentMon/releases) | Microsoft, gratis, < 5 MB. Captura frame times via ETW |
-| ayama-cli.exe | build actual del repo | Para el `presentmon-import` + `bench diff` |
+| phynned-cli.exe | build actual del repo | Para el `presentmon-import` + `bench diff` |
 | El juego/workload | ver §2 | El que vas a testear |
 
 ### 1.3 Privilegios
 
-- **ayama-agent.exe debe correr como Administrator** o cambios de affinity fallan
+- **phynned-agent.exe debe correr como Administrator** o cambios de affinity fallan
   con `PermissionDenied`. Verifica con:
   ```cmd
-  ayama-cli status
+  phynned-cli status
   ```
   Si reporta `Privilege: None` → no es admin. Re-elevar.
 
@@ -83,7 +83,7 @@ Ordenados por reproducibilidad (alto → bajo) y valor de demostración.
 ### 2.1 Minecraft Java + Distant Horizons + shaders (escenario inicial)
 
 **Por qué:** Cero anti-cheat, easy admin, produce 1% lows extremos por chunk
-loading + GC pauses + shader compile + LOD render distance. Ayama X3D puede
+loading + GC pauses + shader compile + LOD render distance. Phynned X3D puede
 aliviar la presión sobre el thread principal.
 
 **Setup mínimo (single-player, reproducible):**
@@ -137,28 +137,28 @@ Since v2.0 the entire flow is automated by the UI bench runner.
 
 1. **Cierra todo lo que no necesites.** Discord, Steam overlay, browsers
    con muchas pestañas. Esto reduce ruido de fondo en los reads de
-   PresentMon y deja CPU headroom claro para Ayama.
+   PresentMon y deja CPU headroom claro para Phynned.
 
 2. **Lanza el juego primero** y llega al escenario que vas a testear
    (§2 — escenarios pre-aprobados). Hazlo ANTES de arrancar el agent
    para que el classifier tenga el game ya en foreground.
 
-3. **Lanza `ayama-agent.exe` como Administrator** (admin necesario para
+3. **Lanza `phynned-agent.exe` como Administrator** (admin necesario para
    ETW + PROCESS_SET_INFORMATION):
    ```powershell
    # From an elevated PowerShell, from the repo root:
-   & ".\build\apps\ayama\tools\ayama-agent\ayama-agent.exe" 2>&1 |
+   & ".\build\apps\phynned\tools\phynned-agent\phynned-agent.exe" 2>&1 |
        Tee-Object -FilePath ".\agent_test.log"
    ```
 
 4. **Verifica que el juego fue clasificado como Game.** En el log del
    agent debería aparecer:
    ```
-   [Ayama][Classify] <gamename>.exe [pid=NNNN] → Game | fs=1 ...
+   [Phynned][Classify] <gamename>.exe [pid=NNNN] → Game | fs=1 ...
    ```
    Si aparece como Unknown, revisa §7 (pitfalls).
 
-5. **Lanza `ayama-ui.exe` como Administrator** (PresentMon hereda los
+5. **Lanza `phynned-ui.exe` como Administrator** (PresentMon hereda los
    privilegios via spawn). Tab "Benchmark".
 
 ### 3.2 Run the 5-run A/B/A/B/A protocol
@@ -176,8 +176,8 @@ En el bench panel:
    - 5 capturas de PresentMon × 30 s = 150 s
    - 4 cooldowns × 3 s = 12 s
    - 4 ack-waits para IPC pause/resume = ~400 ms total
-   - 5 imports de ayama-cli presentmon-import
-   - 1 agregación final ayama-cli bench multi
+   - 5 imports de phynned-cli presentmon-import
+   - 1 agregación final phynned-cli bench multi
    - Total ~3 minutos + overhead I/O
 
 5. **Lee el output** en el panel multi-line: incluye los 5 runs +
@@ -193,31 +193,31 @@ En el bench panel:
   Run 1 baseline tiene FPS o variance muy distintos a Runs 3, 5,
   trátalo como warm-up y nota la observación en el reporte.
 - **Treated stddev mucho menor** que baseline stddev es **la firma de
-  Ayama working** — incluso si la media no se mueve mucho, el frame
+  Phynned working** — incluso si la media no se mueve mucho, el frame
   pacing se estabiliza.
 
 ### 3.4 Análisis
 
-El bench runner ya corrió `ayama-cli bench multi` por ti. Si quieres
+El bench runner ya corrió `phynned-cli bench multi` por ti. Si quieres
 re-correrlo manualmente (e.g. excluyendo runs específicos):
 
 ```powershell
-& ".\build\apps\ayama\tools\ayama-cli\ayama-cli.exe" bench multi `
-    --baseline "$env:TEMP\ayama-bench\run1.bench.csv" `
-    --baseline "$env:TEMP\ayama-bench\run3.bench.csv" `
-    --baseline "$env:TEMP\ayama-bench\run5.bench.csv" `
-    --treated  "$env:TEMP\ayama-bench\run2.bench.csv" `
-    --treated  "$env:TEMP\ayama-bench\run4.bench.csv"
+& ".\build\apps\phynned\tools\phynned-cli\phynned-cli.exe" bench multi `
+    --baseline "$env:TEMP\phynned-bench\run1.bench.csv" `
+    --baseline "$env:TEMP\phynned-bench\run3.bench.csv" `
+    --baseline "$env:TEMP\phynned-bench\run5.bench.csv" `
+    --treated  "$env:TEMP\phynned-bench\run2.bench.csv" `
+    --treated  "$env:TEMP\phynned-bench\run4.bench.csv"
 ```
 
 ### 3.5 Cómo interpretar el verdict
 
 | Verdict | Avg / P99 / P99.9 CIs | Significado |
 |---|---|---|
-| **SIGNIFICANT IMPROVEMENT (P99.9 CI strictly below baseline CI)** | Las 3 sin overlap | Ayama redujo frame times con statistical significance. Reportable. |
+| **SIGNIFICANT IMPROVEMENT (P99.9 CI strictly below baseline CI)** | Las 3 sin overlap | Phynned redujo frame times con statistical significance. Reportable. |
 | **MARGINAL IMPROVEMENT (P99 significant, P99.9 trending but CI overlap)** | Avg/P99 sin overlap, P99.9 overlap | Mejora real pero limitada por sample size en deep tail. Reportable. |
 | **NO STATISTICALLY DETECTABLE DIFFERENCE (CIs overlap)** | Todos overlap | Null result. Honesto reportarlo. Posibles causas: workload no CPU-bound, engine bien threaded, VSync cap, GPU-bound, anti-cheat blocking. Ver §7. |
-| **REGRESSION** | Treated CI strictly above baseline CI | Ayama empeoró el resultado. Investigar — posible bug, mala policy match para el CPU, contaminación de cache de Ayama. |
+| **REGRESSION** | Treated CI strictly above baseline CI | Phynned empeoró el resultado. Investigar — posible bug, mala policy match para el CPU, contaminación de cache de Phynned. |
 
 **Caveat sobre P99.9 vs max frame time**: el bench multi tool usa P99.9
 como driver del verdict. Pero con runs de 30 s × 470+ FPS = 14,000+
@@ -230,9 +230,9 @@ individuales junto al verdict.
 
 ---
 
-## §4 — Reporte format (para `docs/ayama/reports/`)
+## §4 — Reporte format (para `docs/phynned/reports/`)
 
-Crear un archivo: `docs/ayama/reports/minecraft-dh-shaders_<date>_<cpu>.md`
+Crear un archivo: `docs/phynned/reports/minecraft-dh-shaders_<date>_<cpu>.md`
 
 ```markdown
 # Scenario: Minecraft Java + Distant Horizons + shaders
@@ -247,7 +247,7 @@ Crear un archivo: `docs/ayama/reports/minecraft-dh-shaders_<date>_<cpu>.md`
 
 ## Software
 
-- Ayama: build commit XXXX
+- Phynned: build commit XXXX
 - Minecraft: Java 1.21.x
 - Mods: Sodium 0.5.11, Iris 1.7.3, Lithium 0.12.7, Distant Horizons 2.1.1
 - Shader: Complementary Reimagined Unbound r5.2
@@ -261,11 +261,11 @@ Crear un archivo: `docs/ayama/reports/minecraft-dh-shaders_<date>_<cpu>.md`
 - Test scene: creative + speed-60 + vuelo norte 90 s
 - Captura: PresentMon 2.x, 90 s timed
 
-## Phase A — Baseline (Ayama observe-only)
+## Phase A — Baseline (Phynned observe-only)
 
 [Pegar output del `presentmon-import baseline`]
 
-## Phase B — Treated (Ayama PinGameToVCacheCcd, mask=0x000000FF)
+## Phase B — Treated (Phynned PinGameToVCacheCcd, mask=0x000000FF)
 
 [Pegar output del `presentmon-import treated`]
 
@@ -291,11 +291,11 @@ Crear un archivo: `docs/ayama/reports/minecraft-dh-shaders_<date>_<cpu>.md`
 | Síntoma | Causa probable | Fix |
 |---------|----------------|-----|
 | `PresentMon` no captura nada | Necesita admin | Right-click → Run as Administrator |
-| `ayama-cli targets` no muestra javaw | El observer no detecta el proceso por nombre | El default policy pack lista patrones — añadir `javaw.exe` en `policies.toml` |
-| `ayama-cli actions` muestra `failed: PermissionDenied` | Agent no es admin | Reelevar UAC |
+| `phynned-cli targets` no muestra javaw | El observer no detecta el proceso por nombre | El default policy pack lista patrones — añadir `javaw.exe` en `policies.toml` |
+| `phynned-cli actions` muestra `failed: PermissionDenied` | Agent no es admin | Reelevar UAC |
 | Verdict: NO CHANGE pero esperabas mejora | Workload era GPU-bound | Bajar settings gráficos para forzar CPU-bound; verificar GPU% durante test |
-| Verdict: REGRESSION | Tu CPU es single-CCD o Ayama mis-clasificó | `ayama-cli memory list` + considerar `memory clear` |
-| P99 mejora pero variance no | Stutters específicos (e.g. shader compile) no afectados por affinity | Esperado — Ayama no resuelve TODOS los stutters |
+| Verdict: REGRESSION | Tu CPU es single-CCD o Phynned mis-clasificó | `phynned-cli memory list` + considerar `memory clear` |
+| P99 mejora pero variance no | Stutters específicos (e.g. shader compile) no afectados por affinity | Esperado — Phynned no resuelve TODOS los stutters |
 
 ---
 
@@ -309,7 +309,7 @@ Crear un archivo: `docs/ayama/reports/minecraft-dh-shaders_<date>_<cpu>.md`
    el siguiente más reproducible).
 4. **Fase B del Master Plan §11.4**: implementar captura interna de frame
    times (DxgKrnl provider) para eliminar PresentMon como dependencia
-   externa. El protocol se reduce a un solo botón en `ayama-ui`.
+   externa. El protocol se reduce a un solo botón en `phynned-ui`.
 
 ---
 
@@ -341,7 +341,7 @@ poblar caches después de relanzar. ~5-30 segundos de warm-up.
 gana FPS** porque ambos ya están en el techo del display refresh rate.
 
 **Causa**: Si tu pantalla es 144 Hz y el game va a 144 FPS (VSync ON),
-Ayama no puede subir FPS — el bottleneck es el monitor, no el CPU.
+Phynned no puede subir FPS — el bottleneck es el monitor, no el CPU.
 
 **Mitigación**:
 - **Disable VSync** en el game.
@@ -357,10 +357,10 @@ Ayama no puede subir FPS — el bottleneck es el monitor, no el CPU.
 **Síntoma**: GPU al 95-100% durante toda la captura. Frame times muy
 consistentes (low variance), no hay spikes. Treated ≈ baseline.
 
-**Causa**: GPU es el bottleneck, no el CPU. Ayama no acelera GPU.
+**Causa**: GPU es el bottleneck, no el CPU. Phynned no acelera GPU.
 
 **Caso de estudio (Mayo 2026)**: Reports 7 vs 10 son el mismo juego
-(RDR2), misma máquina, misma build de Ayama, **pero distintas escenas**:
+(RDR2), misma máquina, misma build de Phynned, **pero distintas escenas**:
 
 | Test | Scene | Render scale | GPU util | Resultado |
 |---|---|---|---|---|
@@ -386,7 +386,7 @@ totalmente la mejora.
 | **>95%** | **GPU-bound. NO benchmarkear esta escena**. Bajar settings o cambiar escena. |
 
 4. Mientras corre el bench, también monitorea ΔGPU% entre baseline
-   (policies paused) y treated (Ayama active). **Si Ayama reduce CPU
+   (policies paused) y treated (Phynned active). **Si Phynned reduce CPU
    latency, GPU% sube algunos puntos** (ej. 84% → 88% en Report 10).
    Si ΔGPU% ≈ 0, estás GPU-bound aunque no llegues al 95% — el CPU no
    era el cuello de botella.
@@ -397,7 +397,7 @@ totalmente la mejora.
 - **Choose CPU-heavy scenes** (combate intenso, mucho NPC streaming,
   vehicle physics, dense urban).
 - **Si el game es inherentemente GPU-bound en este hardware**, reportar
-  null honestamente — no es failure de Ayama, es scenario mismatch.
+  null honestamente — no es failure de Phynned, es scenario mismatch.
   Pero antes de aceptar el null, intenta una escena CPU-heavy del mismo
   juego: el resultado puede invertirse dramáticamente (Report 7 → 10).
 
@@ -414,7 +414,7 @@ satura el CPU.
 **Síntoma del null genuino bajo este modelo**:
 - Engine well-threaded (RAGE, modded Java, UE5 task-graph), Y
 - Workload con muchos threads activos simultáneamente (verificable
-  con `[Ayama][HotThread]` log o Process Explorer), Y
+  con `[Phynned][HotThread]` log o Process Explorer), Y
 - GPU-bound (ver §7.3 para el diagnóstico)
 
 Cualquiera de las tres condiciones que falte → el NULL es probablemente
@@ -441,7 +441,7 @@ game PID). Cache colliding by name.
 
 **Mitigación**: Confirmar con `Get-Process` que hay dos procesos. Bug
 26 (PID-keyed cache) ya fixea esto post-Mayo-2026. Si ves la falla con
-versión anterior, update Ayama.
+versión anterior, update Phynned.
 
 ### 7.6 — Legacy 32-bit games not detected
 
@@ -453,7 +453,7 @@ Game.
 consulta un target 32-bit. Bug 29 fijo en Mayo 2026 con
 `EnumProcessModulesEx(LIST_MODULES_ALL)`.
 
-**Mitigación**: Update Ayama. Si Ayama está actualizado pero el game
+**Mitigación**: Update Phynned. Si Phynned está actualizado pero el game
 sigue sin detectar, puede ser nombre de exe no en seed patterns —
 añadir manualmente o esperar auto-discovery (~30s en foreground).
 
@@ -466,15 +466,15 @@ como Kind=Game. Falso positivo.
 WS_CAPTION). Sin el style check correcto, pasan el fullscreen gate.
 
 **Mitigación**: Bug fix Mayo 2026 añade window class check
-(`Chrome_WidgetWin_*`) + WS_THICKFRAME check. Update Ayama.
+(`Chrome_WidgetWin_*`) + WS_THICKFRAME check. Update Phynned.
 
 ### 7.8 — Anti-cheat games are out of scope
 
 **Síntoma**: Game con kernel-mode anti-cheat (LoL/Vanguard, Valorant,
 Fortnite/EAC, Apex/EAC, CoD/Ricochet, BF6/EA-Javelin) puede:
-- Negar `PROCESS_VM_READ` a Ayama → check_d3d_vk_modules falla
+- Negar `PROCESS_VM_READ` a Phynned → check_d3d_vk_modules falla
 - Negar `PROCESS_SET_INFORMATION` → policy apply falla
-- En peor caso: flagear Ayama como cheat tool → ban risk
+- En peor caso: flagear Phynned como cheat tool → ban risk
 
 **Mitigación**: **NO TESTEAR** estos juegos. Lista explícita de games
 seguros para test está en `EMPIRICAL_EVIDENCE_SUMMARY.md §Scope`.
@@ -484,7 +484,7 @@ seguros para test está en `EMPIRICAL_EVIDENCE_SUMMARY.md §Scope`.
 **Síntoma**: Avg FPS no cambia (e.g. +1-2% within CI), pero treated
 stddev es 90%+ menor que baseline stddev.
 
-**Causa**: Ayama está estabilizando frame pacing sin acelerar el frame
+**Causa**: Phynned está estabilizando frame pacing sin acelerar el frame
 rate medio. Common en games GPU-bound o moderately threaded
 (Hogwarts, RDR2, BL2).
 
@@ -513,4 +513,4 @@ state, time-of-day del game pueden variar.
 
 **Fin del Empirical Test Protocol v2.0**
 *Compañero de `AYAMA_MASTER_PLAN.md §5.4` (test methodology) + §7.2 (test scenarios) + §11.4 (oportunidades de mejora).*
-*Reportes consolidados: `docs/ayama/reports/EMPIRICAL_EVIDENCE_SUMMARY.md`.*
+*Reportes consolidados: `docs/phynned/reports/EMPIRICAL_EVIDENCE_SUMMARY.md`.*

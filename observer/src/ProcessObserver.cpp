@@ -1,14 +1,14 @@
-// apps/ayama/observer/src/ProcessObserver.cpp
+// observer/src/ProcessObserver.cpp
 // ProcessObserver — platform-agnostic implementation.
 //
 
-#include <ayama/observer/ProcessObserver.hpp>
+#include <phynned/observer/ProcessObserver.hpp>
 #include <phyriad/process/ProcessEnumerator.hpp>
 #include <algorithm>
 #include <cstring>
 #include <cctype>
 
-namespace ayama::observer {
+namespace phynned::observer {
 
 // ── Constructor / Destructor ──────────────────────────────────────────────
 ProcessObserver::ProcessObserver() noexcept {
@@ -183,5 +183,5 @@ void ProcessObserver::refresh() noexcept {
     expire_dead_targets();
 }
 
-} // namespace ayama::observer
+} // namespace phynned::observer
 // Made with my soul - Swately <3

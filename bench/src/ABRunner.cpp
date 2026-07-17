@@ -1,14 +1,14 @@
-// apps/ayama/bench/src/ABRunner.cpp
+// bench/src/ABRunner.cpp
 // ABRunner — A/B test runner implementation.
 //
 
-#include <ayama/bench/ABRunner.hpp>
+#include <phynned/bench/ABRunner.hpp>
 #include <phyriad/hal/Timestamp.hpp>
 
 #include <algorithm>
 #include <cstring>
 
-namespace ayama::bench {
+namespace phynned::bench {
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -202,5 +202,5 @@ DiffReport ABRunner::generate_report() const noexcept
     return r;
 }
 
-} // namespace ayama::bench
+} // namespace phynned::bench
 // Made with my soul - Swately <3

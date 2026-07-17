@@ -1,14 +1,14 @@
-// apps/ayama/core/src/AutoRevertGuard.cpp
+// core/src/AutoRevertGuard.cpp
 // AutoRevertGuard — implementation.
 //
-#include <ayama/core/AutoRevertGuard.hpp>
-#include <ayama/action/ActionExecutor.hpp>
-#include <ayama/learn/PerGameMemory.hpp>
+#include <phynned/core/AutoRevertGuard.hpp>
+#include <phynned/action/ActionExecutor.hpp>
+#include <phynned/learn/PerGameMemory.hpp>
 
 #include <cstring>
 #include <cstdio>
 
-namespace ayama::core {
+namespace phynned::core {
 
 // ── find_entry ────────────────────────────────────────────────────────────────
 MonitorEntry* AutoRevertGuard::find_entry(uint32_t pid) noexcept
@@ -52,7 +52,7 @@ void AutoRevertGuard::on_policy_applied(uint32_t    pid,
     // hits 10+). Only log when we have a meaningful baseline.
     if (current_variance_ms > 0.0f) {
         std::fprintf(stdout,
-            "[Ayama][AutoRevert] Monitoring %s (PID %u) for %llu s. "
+            "[Phynned][AutoRevert] Monitoring %s (PID %u) for %llu s. "
             "Baseline variance=%.2f ms\n",
             exe_name, pid,
             static_cast<unsigned long long>(kMonitorSeconds),
@@ -76,7 +76,7 @@ void AutoRevertGuard::on_tick(uint32_t pid,
         // regression detected" is trivially true and just noise.
         if (e->baseline_variance_ms > 1.0f + 0.0001f) {
             std::fprintf(stdout,
-                "[Ayama][AutoRevert] Monitoring window expired for %s (PID %u) "
+                "[Phynned][AutoRevert] Monitoring window expired for %s (PID %u) "
                 "— no regression detected.\n",
                 e->exe_name, pid);
         }
@@ -93,7 +93,7 @@ void AutoRevertGuard::on_tick(uint32_t pid,
     if (current_variance_ms > threshold) {
         // Regression detected — auto-revert.
         std::fprintf(stderr,
-            "[Ayama][AutoRevert] REGRESSION for %s (PID %u): "
+            "[Phynned][AutoRevert] REGRESSION for %s (PID %u): "
             "variance %.2f ms > threshold %.2f ms (baseline × %.2f). "
             "Auto-reverting.\n",
             e->exe_name, pid,
@@ -142,5 +142,5 @@ bool AutoRevertGuard::was_reverted(uint32_t pid) const noexcept
     return false;
 }
 
-} // namespace ayama::core
+} // namespace phynned::core
 // Made with my soul - Swately <3

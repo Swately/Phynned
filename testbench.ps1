@@ -1,4 +1,4 @@
-# testbench.ps1 -- standalone build+test for Ayama (self-contained project).
+# testbench.ps1 -- standalone build+test for Phynned (self-contained project).
 # Owned by this project since the 2026-07-16 separation (it no longer tracks the
 # container's scripts/gen_testbench.py — edit freely).
 # The build lives IN THIS FOLDER (build/) -- change $BuildRoot to relocate it.
@@ -11,7 +11,7 @@ param(
 )
 $unit  = Split-Path -Leaf $PSScriptRoot
 $build = Join-Path $BuildRoot "build"
-cmake -S $PSScriptRoot -B $build -DAYAMA_BUILD_TESTS=ON -DPHYRIAD_BUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -S $PSScriptRoot -B $build -DPHYNNED_BUILD_TESTS=ON -DPHYRIAD_BUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 if (-not $? -or $LASTEXITCODE -ne 0) { Write-Host "[$unit] CONFIG_FAIL"; exit 1 }
 cmake --build $build
 if (-not $? -or $LASTEXITCODE -ne 0) { Write-Host "[$unit] BUILD_FAIL"; exit 2 }

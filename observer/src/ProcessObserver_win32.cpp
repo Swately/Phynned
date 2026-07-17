@@ -1,4 +1,4 @@
-// apps/ayama/observer/src/ProcessObserver_win32.cpp
+// observer/src/ProcessObserver_win32.cpp
 // Platform-specific Toolhelp32 enumeration removed.
 // ProcessObserver::refresh() now uses phyriad::proc::enumerate_processes (FR-4),
 // which handles both Windows and Linux internally with zero heap allocation.

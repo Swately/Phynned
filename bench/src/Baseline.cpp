@@ -1,12 +1,12 @@
-// apps/ayama/bench/src/Baseline.cpp
+// bench/src/Baseline.cpp
 // Baseline — summary aggregation.
 //
 
-#include <ayama/bench/Baseline.hpp>
+#include <phynned/bench/Baseline.hpp>
 #include <algorithm>
 #include <cmath>
 
-namespace ayama::bench {
+namespace phynned::bench {
 
 BaselineSummary Baseline::summary() const noexcept {
     BaselineSummary r{};
@@ -51,5 +51,5 @@ BaselineSummary Baseline::summary() const noexcept {
     return r;
 }
 
-} // namespace ayama::bench
+} // namespace phynned::bench
 // Made with my soul - Swately <3

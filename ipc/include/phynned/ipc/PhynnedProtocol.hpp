@@ -1,0 +1,184 @@
+// ipc/include/phynned/ipc/PhynnedProtocol.hpp
+// PhynnedProtocol — shared memory layout between phynned-agent and UI clients.
+//
+// Layout (1 MB total):
+//   [0..127]            PhynnedShmHeader   (magic, version, agent_pid, seqlock)
+//   [128..255]          PhynnedStateHeader (counts, flags)
+//   [256..4351]         TargetProcess[64]   (64 × 64  = 4096 B)
+//   [4352..12543]       TargetMetrics[64]   (64 × 128 = 8192 B)
+//   [12544..13055]      PolicyDecision[16]  (16 × 32  = 512  B)
+//   [13056..20607]      ActionLogRing       (phyriad::ipc::Ring<ActionLogEntry,128>
+//                                            = 3×128B atomics + 128×56B slots
+//                                            = 384 + 7168 = 7552 B)
+//   [20608..20671]      PhynnedCommandSlot   (64 B — UI→agent IPC commands)
+//   [20672..1048575]    Baseline ring buffer (~1 MB - 20 KB)
+//
+// kMaxTargets bumped 32→64. Layout offsets correspondingly shifted.
+// ABI version stays at 1 because clients re-read the whole struct via ShmRegion — they
+// don't have hardcoded offsets. If client compatibility breaks, bump kPhynnedShmVersion.
+//
+// Seqlock pattern:
+//   Agent writes: seq++ (now odd) → memcpy → seq++ (now even).
+//   UI reads:     read seq → memcpy → read seq again. Retry if changed.
+//
+// Threading: agent = single writer; UI = multiple readers (no lock).
+// Privilege: CreateFileMapping (agent), OpenFileMapping (clients) — no admin.
+//
+#pragma once
+
+#include <phynned/observer/TargetProcess.hpp>
+#include <phynned/observer/TargetMetrics.hpp>
+#include <phynned/policy/PolicyDecision.hpp>
+#include <phynned/action/ActionLog.hpp>
+
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <phyriad/hal/MemoryOrder.hpp>
+
+namespace phynned::ipc {
+
+inline constexpr uint32_t kPhynnedShmMagic   = 0x41594D41u;  // 'AYMA'
+inline constexpr uint32_t kPhynnedShmVersion = 1u;
+inline constexpr uint64_t kPhynnedShmSize    = 1u * 1024u * 1024u;  // 1 MB
+
+/// Shared memory header (128 bytes, first thing in the mapping).
+struct alignas(64) PhynnedShmHeader {
+    uint32_t            magic;          //  4B  — 'AYMA' sentinel
+    uint32_t            version;        //  4B
+    std::atomic<uint32_t> agent_pid;   //  4B
+    std::atomic<uint32_t> seq;         //  4B  — seqlock counter (odd=writing)
+    uint8_t             _pad[112];     //112B  — fill to 128B
+};
+static_assert(sizeof(PhynnedShmHeader) == 128);
+
+/// High-level counts / flags (128 bytes).
+struct alignas(64) PhynnedStateHeader {
+    uint32_t n_targets;          //  4B  @ 0
+    uint32_t n_decisions;        //  4B  @ 4
+    uint32_t n_active_actions;   //  4B  @ 8
+    uint8_t  agent_connected;    //  1B  @ 12 — 1 when agent is up
+    uint8_t  privilege_level;    //  1B  @ 13 — 0=none, 1=admin-no-ETW, 2=admin+ETW
+    uint8_t  etw_active;         //  1B  @ 14
+    uint8_t  bench_phase;        //  1B  @ 15 — 0=idle, 1=A, 2=B, 3=done
+    uint32_t total_migrations;   //  4B  @ 16 — sum across all targets
+    float    aggregate_pressure; //  4B  @ 20 — 0.0..1.0 avg pressure
+    uint64_t last_publish_tsc;   //  8B  @ 24
+    // ── Extended fields added in v1 (previously _pad) ─────────────────────
+    uint32_t bad_count;          //  4B  @ 32 — per-game bad-list entry count
+    uint8_t  deep_idle;          //  1B  @ 36 — 1 if WorkloadState::DeepIdle
+    uint8_t  watchdog_ok;        //  1B  @ 37 — 1 normally; 0 if stall detected
+    // ── CCD Load Defense telemetry ────────────────────────────
+    uint8_t  _pad1[2];           //  2B  @ 38 — align next uint32_t to 40
+    uint32_t ccd_defense_count;  //  4B  @ 40 — # processes evicted from V-Cache CCD
+    float    ccd_defense_cpu_pct;//  4B  @ 44 — summed CPU% of those processes
+    // ── Hardware classification (publication v1.0) ────────────────────────
+    // Written once at agent startup via set_hw_classification(); does not
+    // change tick-to-tick. UI uses these bytes to render arch-aware text
+    // (X3D vs HybridIntel vs MultiCCXNoX3D vs SingleCCD) without having to
+    // depend on the policy header.
+    uint8_t  cpu_class;          //  1B  @ 48 — policy::CpuClass enum value:
+                                 //         0=Unknown, 1=X3DSingle, 2=X3DDual,
+                                 //         3=HybridIntel, 4=MultiCCXNoX3D, 5=SingleCCD
+    uint8_t  ccd_count;          //  1B  @ 49 — # of CCDs detected (Intel = 1)
+    uint8_t  p_core_count;       //  1B  @ 50 — # P-cores (Intel hybrid only; 0 otherwise)
+    uint8_t  e_core_count;       //  1B  @ 51 — # E-cores (Intel hybrid only; 0 otherwise)
+    // ── Runtime control state ─────────────────────────────────
+    uint8_t  policies_paused;    //  1B  @ 52 — 1 if executor.apply() is gated
+                                 //              off (Start/Pause/Reset UI flow)
+    uint8_t  _pad2a[3];          //  3B  @ 53 — align next float to 4-byte boundary
+    // ── Agent self-resource accounting (SelfMonitor → SHM) ─────
+    // Published every ~500ms by AgentRuntime; ~0 during DeepIdle, single-
+    // digit % during active classification. The status bar surfaces these
+    // so the user can verify Phynned isn't burning their CPU.
+    float    self_cpu_pct;       //  4B  @ 56 — agent process CPU% (0..100)
+    float    self_rss_mb;        //  4B  @ 60 — agent process RSS in megabytes
+    uint8_t  _pad2b[64];         // 64B  @ 64 — fill to 128B
+};
+static_assert(sizeof(PhynnedStateHeader) == 128);
+static_assert(offsetof(PhynnedStateHeader, policies_paused) == 52);
+static_assert(offsetof(PhynnedStateHeader, self_cpu_pct)    == 56);
+static_assert(offsetof(PhynnedStateHeader, self_rss_mb)     == 60);
+static_assert(offsetof(PhynnedStateHeader, ccd_defense_count)   == 40);
+static_assert(offsetof(PhynnedStateHeader, ccd_defense_cpu_pct) == 44);
+static_assert(offsetof(PhynnedStateHeader, cpu_class)           == 48);
+static_assert(offsetof(PhynnedStateHeader, ccd_count)           == 49);
+
+// ── PhynnedCommandSlot ─────────────────────────────────────────────────────
+// UI → agent command channel.
+//
+// Synchronization: client writes args first, then bumps `seq` with release.
+// Agent polls `seq` with acquire; when it differs from `last_processed_seq_`,
+// processes the command and stores the seq back as ack.
+//
+// kPhynnedCmdNone is the initial state. Commands are idempotent — re-issuing
+// the same command with the same seq is a no-op (agent only acts on new seq).
+//
+// Threading: writer = UI thread of one client; reader = agent main thread.
+// Multiple clients sharing the slot would race — single-writer assumption
+// holds because typically only one Phynned UI instance runs per session.
+enum PhynnedCmdKind : uint32_t {
+    kPhynnedCmdNone                  = 0u,
+    kPhynnedCmdPausePolicies         = 1u,  ///< Revert all active, suspend new applies
+    kPhynnedCmdResumePolicies        = 2u,  ///< Re-enable applies
+    kPhynnedCmdForceRevertAll        = 3u,  ///< Revert all but do NOT suspend (single-shot)
+    kPhynnedCmdSetDifferentialPin    = 4u,  ///< Toggle Rule 7 differential pin mode.
+                                          ///<  arg1 = 0 → disable (default Rule 1).
+                                          ///<  arg1 = 1 → enable (differential pin).
+};
+
+struct alignas(64) PhynnedCommandSlot {
+    std::atomic<uint64_t> seq;            //  8B  — bumped by client on submit
+    std::atomic<uint64_t> ack;            //  8B  — bumped by agent after processing
+    uint32_t              cmd_kind;       //  4B  — PhynnedCmdKind
+    uint32_t              target_pid;     //  4B  — optional argument
+    uint64_t              arg1;           //  8B
+    uint64_t              arg2;           //  8B
+    uint8_t               _pad[24];       // 24B  — fill to 64B
+};
+static_assert(sizeof(PhynnedCommandSlot) == 64);
+
+/// Complete shared memory layout — accessed via pointer to mapped region.
+struct PhynnedShmLayout {
+    PhynnedShmHeader   header;                                      // 128B @ 0
+    PhynnedStateHeader state;                                       // 128B @ 128
+    observer::TargetProcess  targets[observer::kMaxTargets];      //4096B @ 256   (64 × 64)
+    observer::TargetMetrics  metrics[observer::kMaxTargets];      //8192B @ 4352  (64 × 128)
+    policy::PolicyDecision   decisions[policy::kMaxDecisionsPerCycle]; //512B @ 12544
+    action::ActionLogRing    action_log;                          //~7552B @ 13056
+    PhynnedCommandSlot         command_slot;                        //  64B @ 20608
+    // Baseline ring fills the rest of the 1 MB mapping.
+};
+// Offsets updated for kMaxTargets=64.
+// command_slot offset added.
+static_assert(offsetof(PhynnedShmLayout, targets)      ==    256u);
+static_assert(offsetof(PhynnedShmLayout, metrics)      ==   4352u);
+static_assert(offsetof(PhynnedShmLayout, decisions)    ==  12544u);
+static_assert(offsetof(PhynnedShmLayout, command_slot) ==  20608u);
+
+// ── Seqlock helpers ───────────────────────────────────────────────────────
+/// Begin a write transaction: seq becomes odd.
+inline void shm_write_begin(PhynnedShmHeader* h) noexcept {
+    h->seq.fetch_add(1u, std::memory_order_acq_rel);  // HAL: acq_rel fetch_add — synchronising counter
+}
+/// End a write transaction: seq becomes even.
+inline void shm_write_end(PhynnedShmHeader* h) noexcept {
+    h->seq.fetch_add(1u, std::memory_order_acq_rel);  // HAL: acq_rel fetch_add — synchronising counter
+}
+/// Read the state header consistently (retry up to 4 times).
+/// Returns true if a consistent read was obtained.
+inline bool shm_read_consistent(const PhynnedShmHeader* h,
+                                 const PhynnedStateHeader* src,
+                                 PhynnedStateHeader* dst) noexcept {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const uint32_t s0 = phyriad::hal::seq_load_acquire(h->seq);
+        if (s0 & 1u) continue;  // writer in progress
+        std::memcpy(dst, src, sizeof(*dst));
+        const uint32_t s1 = phyriad::hal::seq_load_acquire(h->seq);
+        if (s0 == s1) return true;
+    }
+    return false;  // use stale data
+}
+
+} // namespace phynned::ipc
+// Made with my soul - Swately <3

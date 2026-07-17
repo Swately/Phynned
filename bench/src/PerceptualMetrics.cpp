@@ -1,4 +1,4 @@
-// apps/ayama/bench/src/PerceptualMetrics.cpp
+// bench/src/PerceptualMetrics.cpp
 // PerceptualMetrics — compute_perceptual() implementation.
 //
 // Algorithm:
@@ -12,11 +12,11 @@
 // access — guaranteed by the agent's tick-loop architecture.
 //
 
-#include <ayama/bench/PerceptualMetrics.hpp>
+#include <phynned/bench/PerceptualMetrics.hpp>
 #include <algorithm>
 #include <cmath>
 
-namespace ayama::bench {
+namespace phynned::bench {
 
 // ── File-static sort buffers (64 KB total, in .bss) ─────────────────────────
 // Two arrays of Baseline::kMaxSamples floats. Used sequentially, not concurrently.
@@ -107,5 +107,5 @@ PerceptualReport compute_perceptual(const Baseline& b) noexcept
     return r;
 }
 
-} // namespace ayama::bench
+} // namespace phynned::bench
 // Made with my soul - Swately <3

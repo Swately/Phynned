@@ -1,4 +1,4 @@
-// apps/ayama/observer/src/MetricsCollector_win32.cpp
+// observer/src/MetricsCollector_win32.cpp
 // MetricsCollector — Windows implementation.
 //
 // ETW for context-switch tracking; phyriad::proc::ProcessMetricsSnapshot (FR-11)
@@ -20,7 +20,7 @@
 #include <evntcons.h>
 // Note: psapi.h no longer needed — working-set sampled via ProcessMetricsSnapshot.
 
-#include <ayama/observer/MetricsCollector.hpp>
+#include <phynned/observer/MetricsCollector.hpp>
 #include <phyriad/schema/Error.hpp>
 
 #include <cstring>
@@ -30,7 +30,7 @@
 
 // Link: pdh.lib (CMakeLists links it)
 
-namespace ayama::observer {
+namespace phynned::observer {
 
 // ── ETW Provider: Thread context switch (NT Kernel Logger) ─────────────────
 // GUID: {9E814AAD-3204-11D2-9A82-006008A86939} = SystemTraceControlGuid
@@ -108,7 +108,7 @@ std::expected<void, phyriad::Error> MetricsCollector::start() noexcept {
         kProviders, sizeof(kProviders)/sizeof(kProviders[0])};
 
     const auto r_start = etw_session_.start(
-        "AyamaKernel.v1",            // session name (overridable cuando reinicio)
+        "PhynnedKernel.v1",            // session name (overridable cuando reinicio)
         providers_span,
         64u,                         // buffer_size_kb
         16u);                        // max_buffers
@@ -141,7 +141,7 @@ std::expected<void, phyriad::Error> MetricsCollector::start() noexcept {
     etw_active_ = true;
     frame_obs_  = false;  // PresentMon provider hookup en un pass futuro.
     std::fprintf(stdout,
-        "[MetricsCollector] ETW session 'AyamaKernel.v1' running "
+        "[MetricsCollector] ETW session 'PhynnedKernel.v1' running "
         "(%zu providers).\n",
         providers_span.size());
 
@@ -541,6 +541,6 @@ void MetricsCollector::etw_record_callback(const EVENT_RECORD& rec,
     phyriad::hal::stat_fetch_add_relaxed(self->etw_cswitch_pushed_, 1ull);
 }
 
-} // namespace ayama::observer
+} // namespace phynned::observer
 #endif // _WIN32
 // Made with my soul - Swately <3

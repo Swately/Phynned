@@ -5,7 +5,7 @@ choices behind static MinGW runtime linking and the Defender false-positive
 mitigation. This document targets:
 
 - **Maintainers** auditing the build-time choices
-- **Downstream packagers** wanting to repackage Ayama (Chocolatey, Scoop,
+- **Downstream packagers** wanting to repackage Phynned (Chocolatey, Scoop,
   custom installers)
 - **Users** wondering "why is there a PowerShell script in the dist?"
 
@@ -17,8 +17,8 @@ For end-user usage instructions, see the project [`README.md`](../README.md).
 
 ### 1.1 Symptom
 
-A user on a fresh Windows machine downloads the Ayama dist, double-clicks
-`ayama-ui.exe`, and gets three consecutive Windows error dialogs:
+A user on a fresh Windows machine downloads the Phynned dist, double-clicks
+`phynned-ui.exe`, and gets three consecutive Windows error dialogs:
 
 ```
 The code execution cannot proceed because libwinpthread-1.dll was not found.
@@ -54,7 +54,7 @@ they don't exist anywhere. The binary fails before `main()` runs.
 
 | Option | What | Trade-off |
 |---|---|---|
-| **A. Ship the DLLs alongside the .exe** | Copy the 3 DLLs from `<mingw>/bin/` to `ayama-dist/` | Works, but clutters the dist; users see 4 files instead of 1; users may copy only the .exe and break it |
+| **A. Ship the DLLs alongside the .exe** | Copy the 3 DLLs from `<mingw>/bin/` to `phynned-dist/` | Works, but clutters the dist; users see 4 files instead of 1; users may copy only the .exe and break it |
 | **B. Static linking** | Link libstdc++/libgcc/libwinpthread *into* the .exe | Single self-contained .exe; +2-3 MB per binary; license compatibility required |
 | **C. Mandate MSVC** | Switch the dist build to MSVC (Visual Studio runtime is shipped with Windows) | Requires MSVC build of every dependency; rejects gcc-specific extensions; not portable across our two CI toolchains |
 
@@ -64,7 +64,7 @@ reasons:
 1. **Single-file dist matches user expectations.** Most modern Windows
    apps ship as one .exe at the root. Adding 3 mystery DLLs raises
    "is this malware?" questions for non-technical users.
-2. **The size cost is acceptable.** `ayama-ui.exe` grew from ~5 MB
+2. **The size cost is acceptable.** `phynned-ui.exe` grew from ~5 MB
    (dynamic) to 7.2 MB (static). On modern bandwidth this is invisible.
 3. **License compatibility is clean.** All three runtimes explicitly
    allow static linking (see §1.5).
@@ -93,17 +93,17 @@ else()
 endif()
 ```
 
-A duplicate fallback definition lives in `apps/ayama/CMakeLists.txt` so
-the Ayama standalone build (`build.bat`) works without the root project.
+A duplicate fallback definition lives in `CMakeLists.txt` so
+the Phynned standalone build (`build.bat`) works without the root project.
 **Keep the two in sync** if you modify the flags.
 
 The function is called once per end-user binary in
-`apps/ayama/CMakeLists.txt`:
+`CMakeLists.txt`:
 
 ```cmake
-foreach(_ayama_exe ayama-ui ayama-agent ayama-cli ayama-bench ayama-service-register)
-    if(TARGET ${_ayama_exe})
-        phyriad_static_mingw_runtime(${_ayama_exe})
+foreach(_phynned_exe phynned-ui phynned-agent phynned-cli phynned-bench phynned-service-register)
+    if(TARGET ${_phynned_exe})
+        phyriad_static_mingw_runtime(${_phynned_exe})
     endif()
 endforeach()
 ```
@@ -157,7 +157,7 @@ MIT license. No restrictions on linking.
 After a build, verify with `objdump` (or `dumpbin` if you have MSVC tools):
 
 ```bash
-objdump -p build/ayama-dist/ayama-ui.exe | grep "DLL Name:"
+objdump -p build/phynned-dist/phynned-ui.exe | grep "DLL Name:"
 ```
 
 Expected output — system DLLs only, no `lib*` entries:
@@ -183,7 +183,7 @@ appears, the static link failed (likely a CMake regression).
 
 ### 2.1 Symptom
 
-When a user runs `ayama-ui.exe` for the first time, Windows Defender
+When a user runs `phynned-ui.exe` for the first time, Windows Defender
 may quarantine it as *"Trojan:Win32/Wacatac.B!ml"* or similar
 machine-learning-driven detection. SmartScreen may also show
 *"Windows protected your PC"* on first download.
@@ -192,24 +192,24 @@ machine-learning-driven detection. SmartScreen may also show
 
 Three factors compound:
 
-1. **Unsigned binary.** Ayama v1.0 has no commercial code-signing
+1. **Unsigned binary.** Phynned v1.0 has no commercial code-signing
    certificate (target for v1.1). Any unsigned new binary has near-zero
    SmartScreen reputation by default.
 
-2. **Process-affinity API surface.** Ayama calls
+2. **Process-affinity API surface.** Phynned calls
    `SetProcessAffinityMask`, `SetPriorityClass`, and
    `OpenProcess(PROCESS_SET_INFORMATION, ..., other_pid)` on processes
    owned by other users. These exact API calls are textbook signals
    for cheats, miners, and "FPS booster" grey-market tools — which
    Defender's heuristics flag aggressively.
 
-3. **ETW kernel session.** Ayama opens an ETW kernel-mode tracing
+3. **ETW kernel session.** Phynned opens an ETW kernel-mode tracing
    session (`EVENT_TRACE_FLAG_PROCESS | _IMAGE_LOAD`) to enumerate
    game processes without polling the process table. ETW kernel
    sessions are a feature, not a hack, but Defender's ML models pick
    them up as one more "this binary is monitoring the system" signal.
 
-Ayama is verifiably benign — Win32-only, no kernel driver, no code
+Phynned is verifiably benign — Win32-only, no kernel driver, no code
 injection, no memory reads of other processes' address spaces (see
 [`action/`](../action/) for the complete API
 inventory). But Defender's ML cannot prove that from the binary alone
@@ -228,7 +228,7 @@ without a signature establishing provenance.
 We chose **B** as the v1.0 mitigation because:
 
 - It works **today**, no waiting on Microsoft or paying $500.
-- It's **scoped** — only Ayama's specific paths and processes are
+- It's **scoped** — only Phynned's specific paths and processes are
   whitelisted; everything else stays under Defender.
 - It's **reversible** — `add-defender-exclusion.ps1 -Remove` undoes
   the entire change cleanly.
@@ -240,7 +240,7 @@ D and E are the **real** long-term fix. B is the bridge until then.
 ### 2.4 What the script does
 
 ```
-apps/ayama/scripts/add-defender-exclusion.ps1
+scripts/add-defender-exclusion.ps1
 ```
 
 Logical flow:
@@ -250,22 +250,22 @@ Logical flow:
 
 2. **Path detection.** Resolves the install root from
    `$MyInvocation.MyCommand.Path` — the script's own location. This
-   means it works regardless of where the user installs Ayama (Program
+   means it works regardless of where the user installs Phynned (Program
    Files, Documents, USB stick, anywhere). **No hardcoded paths.**
 
-3. **Layout sanity check.** Verifies `<install>/ayama-ui.exe` exists.
+3. **Layout sanity check.** Verifies `<install>/phynned-ui.exe` exists.
    If not, refuses to run so the user doesn't accidentally whitelist
    the wrong directory.
 
 4. **Path exclusions.** Adds two directories to
    `Add-MpPreference -ExclusionPath`:
-   - `<install>` — the Ayama install root
-   - `%LOCALAPPDATA%\Ayama` — runtime config + audit logs
+   - `<install>` — the Phynned install root
+   - `%LOCALAPPDATA%\Phynned` — runtime config + audit logs
 
-5. **Process exclusions.** Adds each Ayama executable to
+5. **Process exclusions.** Adds each Phynned executable to
    `Add-MpPreference -ExclusionProcess`:
-   - `ayama-ui.exe`, `ayama-agent.exe`, `ayama-cli.exe`,
-     `ayama-bench.exe`, `ayama-service-register.exe`
+   - `phynned-ui.exe`, `phynned-agent.exe`, `phynned-cli.exe`,
+     `phynned-bench.exe`, `phynned-service-register.exe`
 
 6. **Result reporting.** Per-line status with explicit *[OK]* /
    *[skip]* indicators so the user knows exactly what happened.
@@ -276,7 +276,7 @@ the same API the Windows Security UI uses internally.
 
 ### 2.5 Why a script, not the installer
 
-We don't ship an MSI installer for Ayama v1.0 (the dist is a
+We don't ship an MSI installer for Phynned v1.0 (the dist is a
 zip-extract layout). When v1.1 introduces an installer, the Defender
 exclusion will be **opt-in** during install — the script remains for
 users who already extracted the zip directly. Both paths converge on
@@ -289,8 +289,8 @@ the same `Add-MpPreference` calls.
   network protection.
 - Does **not** modify Windows Firewall.
 - Does **not** add exclusions outside `<install>` and
-  `%LOCALAPPDATA%\Ayama`.
-- Does **not** survive an Ayama uninstall — paths it excludes simply
+  `%LOCALAPPDATA%\Phynned`.
+- Does **not** survive an Phynned uninstall — paths it excludes simply
   point to non-existent locations after uninstall; harmless, but a
   paranoid user can run `-Remove` first.
 - Does **not** persist across Windows OS reset / fresh-install.
@@ -320,13 +320,13 @@ The build-time pieces:
 - Root `CMakeLists.txt` — defines `phyriad_static_mingw_runtime()`
   (alongside `phyriad_test_dll_env()`, the test-time MinGW runtime
   helper used in the framework's own tests).
-- `apps/ayama/CMakeLists.txt` — duplicate fallback definition (for
-  standalone Ayama builds) + `foreach` loop that applies it to every
+- `CMakeLists.txt` — duplicate fallback definition (for
+  standalone Phynned builds) + `foreach` loop that applies it to every
   end-user binary + `configure_file` that copies
-  `scripts/add-defender-exclusion.ps1` into `ayama-dist/scripts/`.
-- `apps/ayama/scripts/add-defender-exclusion.ps1` — the script itself.
+  `scripts/add-defender-exclusion.ps1` into `phynned-dist/scripts/`.
+- `scripts/add-defender-exclusion.ps1` — the script itself.
 
-To audit changes: `git log -- apps/ayama/scripts/ apps/ayama/CMakeLists.txt`.
+To audit changes: `git log -- scripts/ CMakeLists.txt`.
 
 ## 4. Related documents
 

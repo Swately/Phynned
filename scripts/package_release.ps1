@@ -5,7 +5,7 @@
 #   .\scripts\package_release.ps1 -Version 0.5.0 -Strip -LTO
 #
 # Output:
-#   ayama-<version>-windows-x64.zip in repo root (target < 20 MB).
+#   phynned-<version>-windows-x64.zip in repo root (target < 20 MB).
 #
 # Performance notes:
 #   - LTO/IPO enabled when -LTO is passed (slower link, smaller faster binaries).
@@ -38,7 +38,7 @@ if ($Clean -and (Test-Path $BuildDir)) {
 }
 
 # Self-contained project since the 2026-07-16 separation: the source is this
-# repo's root and the build produces the <build>/ayama-dist layout itself.
+# repo's root and the build produces the <build>/phynned-dist layout itself.
 $cmakeArgs = @(
     "-S", ".",
     "-B", $BuildDir,
@@ -62,9 +62,9 @@ Write-Host "Build completed in $([math]::Round($buildDur, 1)) s"
 
 # ── 3. Verify expected binaries ───────────────────────────────────────────────
 $bins = @(
-    "$BuildDir\ayama-dist\runtime\ayama-agent.exe",
-    "$BuildDir\ayama-dist\ayama-ui.exe",
-    "$BuildDir\ayama-dist\runtime\ayama-cli.exe"
+    "$BuildDir\phynned-dist\runtime\phynned-agent.exe",
+    "$BuildDir\phynned-dist\phynned-ui.exe",
+    "$BuildDir\phynned-dist\runtime\phynned-cli.exe"
 )
 foreach ($b in $bins) {
     if (-not (Test-Path $b)) { throw "Missing binary: $b" }
@@ -119,7 +119,7 @@ if (Test-Path "docs\figures") {
 }
 
 # ── 5. Compress ───────────────────────────────────────────────────────────────
-$outZip = "ayama-$Version-windows-x64.zip"
+$outZip = "phynned-$Version-windows-x64.zip"
 if (Test-Path $outZip) { Remove-Item $outZip }
 
 Write-Host "Compressing to $outZip (Optimal level)..."

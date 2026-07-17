@@ -1,4 +1,4 @@
-// apps/ayama/policy/tests/auto_policy_selector_test.cpp
+// policy/tests/auto_policy_selector_test.cpp
 // Test T7 — Auto Mode classification and AutoPolicySelector decision table.
 //
 // Verifies:
@@ -14,11 +14,11 @@
 // No admin required; no real process needed. Hardware topology uses real probe
 // (whatever CPU is present). Assertions adapt to detected CPU class.
 //
-// §9.2, ayama::policy
+// §9.2, phynned::policy
 
-#include <ayama/policy/AutoPolicySelector.hpp>
-#include <ayama/learn/PerGameMemory.hpp>
-#include <ayama/observer/TargetProcess.hpp>
+#include <phynned/policy/AutoPolicySelector.hpp>
+#include <phynned/learn/PerGameMemory.hpp>
+#include <phynned/observer/TargetProcess.hpp>
 #include <phyriad/topology/HardwareTopology.hpp>
 
 #include <cassert>
@@ -27,9 +27,9 @@
 
 int main()
 {
-    using namespace ayama::policy;
-    using namespace ayama::observer;
-    using namespace ayama::learn;
+    using namespace phynned::policy;
+    using namespace phynned::observer;
+    using namespace phynned::learn;
 
     // ── T7.1: AutoDecision POD ────────────────────────────────────────────────
     {
@@ -57,7 +57,7 @@ int main()
     // ── Topology singleton + init selector ───────────────────────────────────
     // Migrated from HardwareTopology::probe() to the
     // FR-1 singleton hw::topology() — same migration applied to all other
-    // call sites in Ayama; this test was the last holdout.
+    // call sites in Phynned; this test was the last holdout.
     const phyriad::HardwareTopology& topo = phyriad::hw::topology();
     assert(!topo.cores.empty() && "hw::topology() must return a non-empty topology");
 

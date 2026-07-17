@@ -7,16 +7,16 @@
 
 ## The system in one paragraph
 
-Phynned is three cooperating processes. **`ayama-agent`** (the brain, admin) runs a
+Phynned is three cooperating processes. **`phynned-agent`** (the brain, admin) runs a
 single-threaded 100 ms tick: an ETW kernel session + process-table scan feed a
 classifier that decides which processes are performance-sensitive games; a rule
 engine turns that into affinity/priority actions; an executor applies them with
 only three Win32 calls (`SetProcessAffinityMask`, `SetPriorityClass`,
 `SetThreadAffinityMask`) and logs every action; an auto-revert guard undoes
 anything that made frame times worse, and everything reverts on exit — crash
-included. **`ayama-ui`** (the face) is an ImGui window that reads the agent's
-state over shared memory and never touches a game itself. **`ayama-cli`** and
-**`ayama-bench`** script the same controls and run the A/B/A/B/A measurement
+included. **`phynned-ui`** (the face) is an ImGui window that reads the agent's
+state over shared memory and never touches a game itself. **`phynned-cli`** and
+**`phynned-bench`** script the same controls and run the A/B/A/B/A measurement
 protocol.
 
 ## Module map (each module = one static lib + its tests)
@@ -28,7 +28,7 @@ protocol.
 | `action/` | Act: apply affinity/priority, audit every action | `ActionExecutor`, `ActionLog`, `AuditLog` |
 | `learn/` | Remember: per-game outcome history, stale-entry expiry | `PerGameMemory`, `LearnedEntry` |
 | `bench/` | Prove: A/B/A/B/A runner, PresentMon capture, statistics, perceptual metrics | `ABRunner`, `Baseline`, `DiffReport`, `PerceptualMetrics` |
-| `ipc/` | Publish: agent → UI shared-memory channel | `AyamaAgentPublisher`, `PhynnedClient`, `PhynnedProtocol` |
+| `ipc/` | Publish: agent → UI shared-memory channel | `PhynnedAgentPublisher`, `PhynnedClient`, `PhynnedProtocol` |
 | `config/` | Configure: TOML stores, default policy pack | `ConfigStore`, `DefaultPolicyPack` |
 | `core/` | Orchestrate: the tick loop, watchdogs, self-monitoring, single-instance | `AgentRuntime`, `AdaptiveTick`, `AutoRevertGuard`, `InternalWatchdog`, `SelfMonitor` |
 
@@ -39,17 +39,17 @@ Build order (leaf-first, from the root `CMakeLists.txt`):
 ## Process topology
 
 ```
-ayama-ui.exe (user, UAC-elevated)
+phynned-ui.exe (user, UAC-elevated)
    │ spawns + Job-Object-owns
    ▼
-ayama-agent.exe ──────────── ETW kernel session (read-only)
+phynned-agent.exe ──────────── ETW kernel session (read-only)
    │  SHM publisher                │
    ▼                               ▼
-ayama-ui / ayama-cli read     process table scan
+phynned-ui / phynned-cli read     process table scan
 state over phyriad::ipc       (NtQuerySystemInformation)
 ```
 
-`ayama-service-register.exe` optionally installs the agent as a
+`phynned-service-register.exe` optionally installs the agent as a
 `LocalSystem` service instead of the UI-spawned model.
 
 ## The vendored framework (17 units)
@@ -68,12 +68,12 @@ pinned tags the substrate used); they are the only network dependency.
 
 ## Testing
 
-`testbench.ps1` configures with `-DAYAMA_BUILD_TESTS=ON -DPHYRIAD_BUILD_TESTS=ON`,
+`testbench.ps1` configures with `-DPHYNNED_BUILD_TESTS=ON -DPHYRIAD_BUILD_TESTS=ON`,
 builds, **asserts the discovered-test set is non-empty** (a ctest quirk returns
 exit 0 on an empty set — that false green hid a failing test for ~9 weeks until
 2026-07-16), and runs everything: Phynned's 10 module tests + the vendored
 pillars' own suites (49 total at separation). Known coverage gaps, recorded
-honestly: `config/` has no test source (`ayama_config_test` is declared behind
+honestly: `config/` has no test source (`phynned_config_test` is declared behind
 an `if(EXISTS)` that has never been true) and `ipc/` has no tests at all (no
 `tests/` directory, no `add_test`) — 6 of the 8 modules are covered.
 

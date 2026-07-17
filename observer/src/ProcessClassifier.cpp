@@ -1,9 +1,9 @@
-// apps/ayama/observer/src/ProcessClassifier.cpp
+// observer/src/ProcessClassifier.cpp
 // ProcessClassifier — implementation.
 //
 
-#include <ayama/observer/ProcessClassifier.hpp>
-#include <ayama/observer/KindOverrides.hpp>  // for ::lookup() in classify()
+#include <phynned/observer/ProcessClassifier.hpp>
+#include <phynned/observer/KindOverrides.hpp>  // for ::lookup() in classify()
 
 #include <cstring>
 #include <cctype>
@@ -17,7 +17,7 @@
 #  include <psapi.h>
 #endif
 
-namespace ayama::observer {
+namespace phynned::observer {
 
 // ── Case-insensitive name comparison ─────────────────────────────────────────
 static bool istr_eq(const char* a, const char* b) noexcept
@@ -127,7 +127,7 @@ bool ProcessClassifier::check_d3d_vk_modules(uint32_t pid) noexcept
         // Mayo 2026 bug fix: use EnumProcessModulesEx with LIST_MODULES_ALL
         // instead of EnumProcessModules. The latter is documented to fail
         // when a 64-bit caller queries a 32-bit (WoW64) target — it returns
-        // no modules at all, or wrong data. ayama-agent.exe is 64-bit, so
+        // no modules at all, or wrong data. phynned-agent.exe is 64-bit, so
         // legacy 32-bit games (Borderlands 2, BioShock, Mass Effect original,
         // Skyrim LE, Fallout 3/NV, Half-Life 2/Source games, Civ V, GTA IV,
         // most pre-2015 games) were INVISIBLE to D3D detection — auto-
@@ -273,5 +273,5 @@ TargetKind ProcessClassifier::classify(const ProcessInfo& p) noexcept
     return TargetKind::Unknown;
 }
 
-} // namespace ayama::observer
+} // namespace phynned::observer
 // Made with my soul - Swately <3

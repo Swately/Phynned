@@ -1,5 +1,5 @@
-# ayama/observer/CMakeLists.txt
-# ayama_observer — ProcessObserver, MetricsCollector, ProcessClassifier,
+# phynned/observer/CMakeLists.txt
+# phynned_observer — ProcessObserver, MetricsCollector, ProcessClassifier,
 #                  ForegroundWatcher, ClassificationCache, TargetProcess, TargetMetrics.
 #
 # Dependencies: phyriad_schema, phyriad_hal, phyriad_topology (for hw:: APIs),
@@ -20,13 +20,13 @@ set(_obs_sources
     src/ProcessClassifier.cpp
 )
 
-add_library(ayama_observer STATIC ${_obs_sources})
+add_library(phynned_observer STATIC ${_obs_sources})
 
-target_include_directories(ayama_observer PUBLIC
+target_include_directories(phynned_observer PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(ayama_observer PUBLIC
+target_link_libraries(phynned_observer PUBLIC
     phyriad_schema
     phyriad_hal
     phyriad_topology  # set_process_affinity / set_process_priority via hw::
@@ -36,26 +36,26 @@ target_link_libraries(ayama_observer PUBLIC
 )
 
 if(WIN32)
-    target_link_libraries(ayama_observer PUBLIC psapi pdh kernel32)
+    target_link_libraries(phynned_observer PUBLIC psapi pdh kernel32)
 endif()
 
-target_compile_features(ayama_observer PUBLIC cxx_std_23)
+target_compile_features(phynned_observer PUBLIC cxx_std_23)
 
 if(MSVC)
-    target_compile_options(ayama_observer PRIVATE /W4 /wd4100)
+    target_compile_options(phynned_observer PRIVATE /W4 /wd4100)
 else()
-    target_compile_options(ayama_observer PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(phynned_observer PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-if(AYAMA_BUILD_TESTS)
-    add_executable(ayama_observer_test tests/process_observer_test.cpp)
-    target_link_libraries(ayama_observer_test PRIVATE ayama_observer ayama_policy)
-    target_compile_features(ayama_observer_test PRIVATE cxx_std_23)
+if(PHYNNED_BUILD_TESTS)
+    add_executable(phynned_observer_test tests/process_observer_test.cpp)
+    target_link_libraries(phynned_observer_test PRIVATE phynned_observer phynned_policy)
+    target_compile_features(phynned_observer_test PRIVATE cxx_std_23)
     if(NOT MSVC)
-        target_compile_options(ayama_observer_test PRIVATE -Wall -Wextra)
+        target_compile_options(phynned_observer_test PRIVATE -Wall -Wextra)
     endif()
     enable_testing()
-    add_test(NAME ayama_observer_test COMMAND ayama_observer_test)
+    add_test(NAME phynned_observer_test COMMAND phynned_observer_test)
 endif()
 # Made with my soul - Swately <3

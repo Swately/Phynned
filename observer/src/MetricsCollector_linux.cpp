@@ -1,4 +1,4 @@
-// apps/ayama/observer/src/MetricsCollector_linux.cpp
+// observer/src/MetricsCollector_linux.cpp
 // MetricsCollector — Linux implementation.
 //
 // Uses phyriad::proc::ProcessMetricsSnapshot (FR-11) for bulk CPU/memory
@@ -9,14 +9,14 @@
 //
 #ifndef _WIN32
 
-#include <ayama/observer/MetricsCollector.hpp>
+#include <phynned/observer/MetricsCollector.hpp>
 #include <phyriad/schema/Error.hpp>
 
 #include <cstdio>
 #include <cstring>
 #include <time.h>   // clock_gettime(CLOCK_MONOTONIC)
 
-namespace ayama::observer {
+namespace phynned::observer {
 
 // ── Constructor / Destructor ──────────────────────────────────────────────
 MetricsCollector::MetricsCollector() noexcept {
@@ -175,6 +175,6 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
     }
 }
 
-} // namespace ayama::observer
+} // namespace phynned::observer
 #endif // !_WIN32
 // Made with my soul - Swately <3

@@ -19,7 +19,7 @@ compile_commands.json
 docs/reports/raw_data/
 
 # Release zips
-ayama-*-windows-x64.zip
+phynned-*-windows-x64.zip
 
 # Scratch
 *.bak

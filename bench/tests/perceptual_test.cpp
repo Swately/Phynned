@@ -1,4 +1,4 @@
-// apps/ayama/bench/tests/perceptual_test.cpp
+// bench/tests/perceptual_test.cpp
 // Test: compute_perceptual() correctness.
 //
 // Verifies:
@@ -11,8 +11,8 @@
 // All inputs synthetic — no real process or ETW needed.
 //
 
-#include <ayama/bench/PerceptualMetrics.hpp>
-#include <ayama/bench/Baseline.hpp>
+#include <phynned/bench/PerceptualMetrics.hpp>
+#include <phynned/bench/Baseline.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -23,7 +23,7 @@ static bool near(float a, float b, float eps = 0.5f) {
 }
 
 int main() {
-    using namespace ayama::bench;
+    using namespace phynned::bench;
 
     // ── Test 1: PerceptualReport POD ─────────────────────────────────────────
     {
