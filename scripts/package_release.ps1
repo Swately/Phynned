@@ -64,7 +64,11 @@ Write-Host "Build completed in $([math]::Round($buildDur, 1)) s"
 $bins = @(
     "$BuildDir\phynned-dist\runtime\phynned-agent.exe",
     "$BuildDir\phynned-dist\phynned-ui.exe",
-    "$BuildDir\phynned-dist\runtime\phynned-cli.exe"
+    "$BuildDir\phynned-dist\runtime\phynned-cli.exe",
+    # 0.2.0 safety tools: dead-man revert (restores affinities if the agent
+    # died hard) and the standalone anti-cheat probe.
+    "$BuildDir\phynned-dist\runtime\phynned-revert.exe",
+    "$BuildDir\phynned-dist\runtime\phynned-acprobe.exe"
 )
 foreach ($b in $bins) {
     if (-not (Test-Path $b)) { throw "Missing binary: $b" }
