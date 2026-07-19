@@ -144,6 +144,15 @@ struct PerformanceProfile {
     bool     use_busy_wait_loop   {true};  // high-res busy-wait for outer loop
     bool     allow_timer_coalescing{false};// Windows timer-coalescence (lowers power)
 
+    // ── Outer-loop rate cap (Phynned UI power fix, 2026-07-19) ──────────────
+    // 0 = unpaced (previous behavior: tick as fast as nodes allow, idle branch
+    // only yields — effectively burns a core in single-threaded GUI graphs).
+    // >0 = the single-threaded run() loop paces ITSELF to this frequency with
+    // sleep_until, capping every node (poll/logic/render/present) at that rate.
+    // Made for dashboard-style UIs whose data changes ~1×/s: 60 Hz keeps input
+    // latency ≤16 ms while cutting the spin. Multi-threaded mode ignores it.
+    uint32_t target_loop_hz       {0u};
+
     // Applies a coarse preset. Does NOT size node_profiles/ring_profiles —
     // those remain empty until the runtime's create() pass fills them
     // (or the caller invokes make_auto_profile() instead).

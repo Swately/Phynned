@@ -48,6 +48,7 @@ set(TOPOLOGY_SOURCES
     src/HybridCoreDetector.cpp
     src/PCIeAffinityProbe.cpp
     src/HardwareTopology.cpp
+    src/CoreTelemetry.cpp
 )
 
 add_library(phyriad_topology STATIC ${TOPOLOGY_SOURCES})
@@ -69,7 +70,9 @@ if(WIN32)
     #           GetNumaAvailableMemoryNodeEx, SetThreadAffinityMask, etc.
     # avrt:     THREAD_PROTECTION S2 — MMCSS (AvSetMmThreadCharacteristics /
     #           AvSetMmThreadPriority / AvRevertMmThreadCharacteristics).
-    target_link_libraries(phyriad_topology PUBLIC kernel32 avrt)
+    # pdh:      CoreTelemetry PDH backend (% Processor Performance counter).
+    # powrprof: CoreTelemetry base-clock detection (CallNtPowerInformation MaxMhz).
+    target_link_libraries(phyriad_topology PUBLIC kernel32 avrt pdh powrprof)
 endif()
 
 if(UNIX AND NOT APPLE)
@@ -111,6 +114,24 @@ if(BUILD_TESTING OR PHYRIAD_BUILD_TESTS)
     add_test(
         NAME    thread_affinity_test
         COMMAND thread_affinity_test
+        LABELS  topology
+    )
+
+    # CoreTelemetry — per-core clock telemetry (HWiNFO SHM / PDH auto-select).
+    # Eyeball harness: prints backend + base clock + per-core MHz. Returns
+    # non-zero only if BOTH backends fail to read any clocks.
+    add_executable(core_telemetry_test
+        tests/core_telemetry_test.cpp
+    )
+    target_link_libraries(core_telemetry_test PRIVATE
+        phyriad_topology
+        Threads::Threads
+    )
+    target_compile_features(core_telemetry_test PRIVATE cxx_std_23)
+
+    add_test(
+        NAME    core_telemetry_test
+        COMMAND core_telemetry_test
         LABELS  topology
     )
 endif()

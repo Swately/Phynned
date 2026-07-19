@@ -15,6 +15,7 @@
 //
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <type_traits>
 
@@ -64,10 +65,26 @@ struct alignas(8) PhynnedSnapshotMini {
     uint8_t  e_core_count;           // 243  # E-cores (Intel hybrid only; else 0)
     // ── Runtime control state ─────────────────────────────────
     uint8_t  policies_paused;        // 244  1 if agent.executor.apply() gated off
-    uint8_t  _pad_d2[11];            // 245  fill to 256B
+    uint8_t  _pad_d2a[3];            // 245  align total_tracked to offset 248
+    // ── MASS-router detection scale ───────────────────────────
+    uint32_t total_tracked;          // 248  full internal touchable count observed
+                                     //        by the agent (≥ target_count). The
+                                     //        table shows the top target_count of
+                                     //        these; the rest are observed only.
+    // ── MR-2 background corral mode ───────────────────────────
+    uint8_t  corral_live;            // 252  1 = LIVE switch ON (0 = DRY-RUN default)
+    uint8_t  corral_coexist_block;   // 253  1 = coexistence optimizer forces DRY-RUN
+    // ── W4 global profile (use-modes) ─────────────────────────
+    uint8_t  profile;                // 254  config::Profile: 0=Monitor 1=Games
+                                     //        2=GamesCorral 3=Full
+    uint8_t  _pad_d2b;               // 255  fill to 256B
 };
 static_assert(sizeof(PhynnedSnapshotMini) == 256u,
     "PhynnedSnapshotMini must be exactly 256B");
+static_assert(offsetof(PhynnedSnapshotMini, total_tracked) == 248u,
+    "total_tracked must be 4-byte aligned at offset 248");
+static_assert(offsetof(PhynnedSnapshotMini, profile) == 254u,
+    "profile byte carved from _pad_d2b @254");
 static_assert(std::is_trivially_copyable_v<PhynnedSnapshotMini>);
 static_assert(std::is_standard_layout_v<PhynnedSnapshotMini>);
 

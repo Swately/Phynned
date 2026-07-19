@@ -54,10 +54,31 @@ struct CswitchEvent {
 };
 #pragma pack(pop)
 
+// ── Fix A (MR-2): read a process's current affinity mask ───────────────────
+// One OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)+GetProcessAffinityMask per
+// target, on capture ticks only (cached between). QUERY_LIMITED (0x1000) is the
+// least right that lets GetProcessAffinityMask succeed (verified on-box; SET-only
+// 0x0200 returns ACCESS_DENIED) and is not cheat-shaped. Degrades to 0 when the
+// open fails (PPL / access denied) — the caller reads 0 as "unknown / floating".
+// Returns the low 32 bits (TargetMetrics masks are uint32_t; the 7950X3D has 32
+// logical cores).
+static uint32_t read_process_affinity_mask(uint32_t pid) noexcept {
+    if (pid == 0u) return 0u;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           static_cast<DWORD>(pid));
+    if (!h) return 0u;
+    DWORD_PTR proc_mask = 0u, sys_mask = 0u;
+    const BOOL ok = GetProcessAffinityMask(h, &proc_mask, &sys_mask);
+    CloseHandle(h);
+    if (!ok) return 0u;
+    return static_cast<uint32_t>(proc_mask & 0xFFFFFFFFull);
+}
+
 // ── Constructor / Destructor ──────────────────────────────────────────────
 MetricsCollector::MetricsCollector() noexcept {
     etw_ring_.fill(CtxSwEvent{});
     pid_states_.fill(PidState{});
+    hot_track_.fill(HotTrackState{});
 }
 
 MetricsCollector::~MetricsCollector() noexcept {
@@ -187,8 +208,28 @@ MetricsCollector::find_or_create_pid_state(uint32_t pid) noexcept {
     s = PidState{};
     s.pid   = pid;
     s.valid = true;
-    pid_hash_insert(pid, static_cast<uint8_t>(new_idx));
+    pid_hash_insert(pid, static_cast<uint16_t>(new_idx));
     return &s;
+}
+
+// ── acquire_hot_track — lazily claim a fat hot-thread slot (routed few) ─────
+// MASS-router: only busy multi-threaded processes reach here (gated by
+// kHotTrackMinThreads in sample()), so the 128-slot pool never starves a game.
+MetricsCollector::HotTrackState*
+MetricsCollector::acquire_hot_track(PidState& s) noexcept {
+    if (s.hot_slot_plus_1 != 0u) {
+        HotTrackState& hs = hot_track_[s.hot_slot_plus_1 - 1u];
+        if (hs.owner_pid == s.pid) return &hs;
+        // Slot was recycled to another PID — drop the stale handle, re-claim.
+        s.hot_slot_plus_1 = 0u;
+    }
+    if (n_hot_track_ >= kMaxHotTrackStates) return nullptr;  // pool full → skip
+    const uint32_t idx = n_hot_track_++;
+    HotTrackState& hs = hot_track_[idx];
+    hs = HotTrackState{};
+    hs.owner_pid = s.pid;
+    s.hot_slot_plus_1 = idx + 1u;
+    return &hs;
 }
 
 // ── TID→PID cache lookup ──────────────────────────────────────────────────
@@ -249,7 +290,8 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
         (++bulk_capture_counter_ >= kBulkCaptureInterval);
     if (do_capture) bulk_capture_counter_ = 0u;
 
-    phyriad::proc::ProcessMetrics bulk[kMaxTargets]{};
+    // Off-stack scratch (Impl member) — avoids a 64 KB stack frame at MASS cap.
+    phyriad::proc::ProcessMetrics* bulk = bulk_scratch_.data();
     bool snapshot_ok = false;
 
     if (do_capture && snapshot_.has_value()) {
@@ -312,13 +354,40 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
             // ── Thread count ──────────────────────────────────────────────
             out.observed_threads     = pm.thread_count;
 
+            // ── Working set (RSS) in MB — MR-1 shadow-router input ────────
+            // Already sampled by ProcessMetricsSnapshot (FR-11); surface it into
+            // TargetMetrics so the RouteAdvisor can position it vs the 32/96MB L3
+            // boundaries. Integer MB is plenty for the proxy (no sub-MB precision
+            // needed). Bytes→MB via >>20.
+            out.working_set_mb =
+                static_cast<uint32_t>(pm.working_set_bytes >> 20u);
+
+            // ── Current affinity mask (Fix A, MR-2) — one QUERY_LIMITED handle
+            // per target on the 500 ms capture cadence; cached between. Feeds the
+            // RouteAdvisor already_there test + the MR-2 corral V-Cache predicate.
+            // COST GATE (M3 "lo más barato"): only open the handle for ACTIVE
+            // processes (>= 1% CPU). The idle mass herd — the hundreds of tracked
+            // processes — never pays for the syscall; they get 0 (which the corral
+            // reads as "not a candidate" anyway, since a corral candidate must be
+            // >= kCorralActiveCpuPct = 3%). This keeps the per-tick handle count
+            // O(active few) instead of O(all touchable).
+            static constexpr float kCurrentMaskCpuFloor = 1.0f;
+            out.current_core_mask =
+                (out.cpu_usage_pct >= kCurrentMaskCpuFloor)
+                    ? read_process_affinity_mask(pid)
+                    : 0u;
+
             // Update cache for non-capture ticks.
-            state->cached_cpu_pct       = out.cpu_usage_pct;
-            state->cached_thread_count  = pm.thread_count;
+            state->cached_cpu_pct           = out.cpu_usage_pct;
+            state->cached_thread_count      = pm.thread_count;
+            state->cached_working_set_mb    = out.working_set_mb;
+            state->cached_current_core_mask = out.current_core_mask;
         } else {
             // ── Non-capture tick: emit cached values ──────────
-            out.cpu_usage_pct    = state->cached_cpu_pct;
-            out.observed_threads = state->cached_thread_count;
+            out.cpu_usage_pct     = state->cached_cpu_pct;
+            out.observed_threads  = state->cached_thread_count;
+            out.working_set_mb    = state->cached_working_set_mb;
+            out.current_core_mask = state->cached_current_core_mask;
         }
 
         // ── Migration rate (delta from last sample) — always fresh ────────
@@ -364,9 +433,21 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
         //
         // On non-capture ticks we emit the cached value so consumers see
         // a stable TID across throttled bulk-capture intervals.
-        if (snapshot_ok && snapshot_.has_value()) {
+        // MASS-router: gate the FAT hot-thread tracking on thread count. Only
+        // busy multi-threaded processes (>= kHotTrackMinThreads) claim a slot from
+        // the bounded hot_track_ pool; the idle mass herd never allocates one (its
+        // hot_tid stays 0, which is fine — hot_tid is consumed ONLY by the Game
+        // differential-pin rule, and games always clear the thread bar). The
+        // algorithm below is byte-for-byte the pre-MASS logic, just reading/writing
+        // the pooled HotTrackState `hs` instead of inline PidState fields.
+        HotTrackState* hs =
+            (out.observed_threads >= kHotTrackMinThreads)
+                ? acquire_hot_track(*state)
+                : nullptr;
+
+        if (hs && snapshot_ok && snapshot_.has_value()) {
             constexpr uint32_t kMaxThreadsPerProcess =
-                PidState::kMaxTrackedThreads;  // 64
+                HotTrackState::kMaxTrackedThreads;  // 64
             phyriad::proc::ThreadEntry threads[kMaxThreadsPerProcess];
             const uint32_t n_threads = snapshot_->extract_threads(
                 pid, threads, kMaxThreadsPerProcess);
@@ -379,10 +460,10 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
                 const uint64_t cur_total = te.kernel_time_100ns
                                          + te.user_time_100ns;
                 // Linear search for this TID in prev snapshot.
-                for (uint32_t pi = 0u; pi < state->n_prev_threads; ++pi) {
-                    if (state->prev_threads[pi].tid == te.tid) {
+                for (uint32_t pi = 0u; pi < hs->n_prev_threads; ++pi) {
+                    if (hs->prev_threads[pi].tid == te.tid) {
                         const uint64_t prev_total =
-                            state->prev_threads[pi].prev_total_100ns;
+                            hs->prev_threads[pi].prev_total_100ns;
                         if (cur_total > prev_total) {
                             const uint64_t d = cur_total - prev_total;
                             if (d > max_delta_100ns) {
@@ -397,35 +478,36 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
 
             // Step 4-5: confidence gate.
             if (max_delta_tid != 0u) {
-                if (max_delta_tid == state->hot_tid_candidate) {
-                    if (state->hot_tid_consecutive < 255u) {
-                        ++state->hot_tid_consecutive;
+                if (max_delta_tid == hs->hot_tid_candidate) {
+                    if (hs->hot_tid_consecutive < 255u) {
+                        ++hs->hot_tid_consecutive;
                     }
                 } else {
-                    state->hot_tid_candidate   = max_delta_tid;
-                    state->hot_tid_consecutive = 1u;
+                    hs->hot_tid_candidate   = max_delta_tid;
+                    hs->hot_tid_consecutive = 1u;
                 }
-                if (state->hot_tid_consecutive >= kHotConfidenceMin) {
-                    state->cached_hot_tid = max_delta_tid;
+                if (hs->hot_tid_consecutive >= kHotConfidenceMin) {
+                    hs->cached_hot_tid = max_delta_tid;
                 }
             }
-            out.hot_tid = state->cached_hot_tid;
+            out.hot_tid = hs->cached_hot_tid;
 
             // Step 6: update prev_threads snapshot for next sample.
             const uint32_t store_n = (n_threads < kMaxThreadsPerProcess)
                                      ? n_threads : kMaxThreadsPerProcess;
             for (uint32_t ti = 0u; ti < store_n; ++ti) {
-                state->prev_threads[ti].tid = threads[ti].tid;
-                state->prev_threads[ti].prev_total_100ns =
+                hs->prev_threads[ti].tid = threads[ti].tid;
+                hs->prev_threads[ti].prev_total_100ns =
                     threads[ti].kernel_time_100ns
                   + threads[ti].user_time_100ns;
             }
-            state->n_prev_threads = store_n;
-        } else {
-            // Non-capture tick: emit cached hot_tid so consumers see stable
-            // value across throttled bulk-capture intervals.
-            out.hot_tid = state->cached_hot_tid;
+            hs->n_prev_threads = store_n;
+        } else if (hs) {
+            // Non-capture tick for a tracked-hot process: emit cached hot_tid so
+            // consumers see a stable value across throttled bulk-capture intervals.
+            out.hot_tid = hs->cached_hot_tid;
         }
+        // else: herd process (or pool exhausted) — out.hot_tid stays 0 (memset).
     }
 }
 

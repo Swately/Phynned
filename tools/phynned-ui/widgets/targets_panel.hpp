@@ -4,7 +4,13 @@
 // Reads targets[] and metrics[] DIRECTLY from PhynnedClient (not the Ring)
 // to avoid copying the large arrays (~6KB) each frame.
 //
-// Columns: PID | Name | Kind | CPU% | Migrations/s | Frame P99 | Pressure | Affinity
+// Columns: PID | Name | Kind | CPU% | Migrations/s | Frame P99 | Pressure |
+//          Affinity | WS(MB) | Advice
+//
+// MR-1 (shadow router): the WS + Advice columns surface the read-only per-process
+// CCD recommendation. Advice is a SHADOW recommendation only — nothing is placed
+// by it (the green "Affinity" column is the only column reflecting a real placement,
+// done by the separate AC-gated game path).
 #pragma once
 #include "../PhynnedAppState.hpp"
 #include <phynned/ipc/PhynnedClient.hpp>
@@ -14,6 +20,8 @@
 #include <imgui.h>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <vector>
 
 namespace {
 
@@ -45,12 +53,44 @@ inline OverridesUiState& overrides_ui() noexcept {
     return st;
 }
 
+// Case-insensitive ASCII exe-name compare (matches the agent's rule matching).
+inline bool ci_eq_name(const char* a, const char* b) noexcept {
+    if (!a || !b) return false;
+    while (*a != '\0' && *b != '\0') {
+        char ca = (*a >= 'A' && *a <= 'Z') ? static_cast<char>(*a + 32) : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? static_cast<char>(*b + 32) : *b;
+        if (ca != cb) return false;
+        ++a; ++b;
+    }
+    return *a == *b;
+}
+
 // Pressure level color
 inline ImVec4 pressure_color(uint8_t lvl) noexcept {
     switch (lvl) {
         case 2:  return ImVec4{0.95f, 0.30f, 0.25f, 1.f};  // red
         case 1:  return ImVec4{0.95f, 0.80f, 0.20f, 1.f};  // yellow
         default: return ImVec4{0.30f, 0.90f, 0.40f, 1.f};  // green
+    }
+}
+
+// MR-1 shadow-router advice → short label + color.
+// advice_ccd: 0 = none/LeaveAlone, 1 = VCache, 2 = Frequency,
+//             3 = WouldCorral (MR-2: the corral WOULD move this to the Freq CCD).
+inline const char* advice_ccd_str(uint8_t ccd) noexcept {
+    switch (ccd) {
+        case 1:  return "V-Cache";
+        case 2:  return "Freq";
+        case 3:  return "Corral!";  // MR-2 would-corral candidate
+        default: return "--";
+    }
+}
+inline ImVec4 advice_ccd_color(uint8_t ccd) noexcept {
+    switch (ccd) {
+        case 1:  return ImVec4{0.45f, 0.75f, 1.00f, 1.f};  // cyan-blue = cache-sensitive
+        case 2:  return ImVec4{1.00f, 0.65f, 0.25f, 1.f};  // orange   = clock-bound
+        case 3:  return ImVec4{0.95f, 0.45f, 0.30f, 1.f};  // red-orange = would-corral
+        default: return ImVec4{0.55f, 0.55f, 0.55f, 1.f};  // dim      = no advice
     }
 }
 
@@ -73,41 +113,116 @@ inline void draw_targets_panel(const PhynnedAppState& s,
     const auto metrics = ac->metrics();
 
     if (targets.empty()) {
-        ImGui::TextDisabled("No targets currently observed.");
+        ImGui::TextDisabled("No processes observed yet.");
         ImGui::Spacing();
         ImGui::TextDisabled(
-            "Phynned watches for games, streaming apps and comms tools.\n"
-            "Launch a game or OBS to see them here.");
+            "Phynned now observes every touchable process on the system and\n"
+            "routes the ones that benefit onto the right CCD. If this stays\n"
+            "empty, the agent may still be starting or lacks the rights to\n"
+            "enumerate processes.");
         return;
     }
 
-    ImGui::Text("%u target(s) observed:", static_cast<uint32_t>(targets.size()));
+    // MASS-router: separate ROUTED (Phynned applied an affinity) from
+    // OBSERVED-only (tracked but untouched — the mass herd). allowed_core_mask
+    // != 0 ⇒ Phynned constrained this process's cores this cycle.
+    uint32_t n_routed = 0u;
+    for (const auto& m : metrics)
+        if (m.allowed_core_mask != 0u) ++n_routed;
+
+    const uint32_t n_shown   = static_cast<uint32_t>(targets.size());
+    const uint32_t n_tracked = s.snap.total_tracked;  // full internal count
+    if (n_tracked > n_shown)
+        ImGui::Text("Observing %u processes  ·  showing top %u  ·  %u routed",
+                    n_tracked, n_shown, n_routed);
+    else
+        ImGui::Text("Observing %u process(es)  ·  %u routed", n_shown, n_routed);
+    ImGui::TextDisabled(
+        "Routed = Phynned is actively placing it (green affinity below).  "
+        "Observed = tracked only.  "
+        "Advice = SHADOW recommendation (would route to V-Cache/Freq) — "
+        "nothing is placed by it.");
+    ImGui::TextDisabled(
+        "CPU%% is PER-CORE: 100%% = one full core saturated. Task Manager "
+        "divides by all 32 logical cores, so it shows ~1/32 of this number.  "
+        "Click a column header to sort.");
     ImGui::Separator();
 
     // ── Table ─────────────────────────────────────────────────────────────────
     constexpr ImGuiTableFlags kTableFlags =
         ImGuiTableFlags_Borders    | ImGuiTableFlags_RowBg  |
         ImGuiTableFlags_ScrollY    | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_SizingStretchProp;
+        ImGuiTableFlags_SizingStretchProp |
+        ImGuiTableFlags_Sortable   | ImGuiTableFlags_SortMulti;
 
     const float row_height = ImGui::GetTextLineHeightWithSpacing();
     const float table_height = row_height * 12.f;
 
-    if (ImGui::BeginTable("##targets", 8, kTableFlags,
+    if (ImGui::BeginTable("##targets", 10, kTableFlags,
                           ImVec2{0.f, table_height}))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("PID",        ImGuiTableColumnFlags_WidthFixed, 70.f);
         ImGui::TableSetupColumn("Name",       ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Kind",       ImGuiTableColumnFlags_WidthFixed, 80.f);
-        ImGui::TableSetupColumn("CPU%",       ImGuiTableColumnFlags_WidthFixed, 60.f);
+        ImGui::TableSetupColumn("CPU%",       ImGuiTableColumnFlags_WidthFixed |
+            ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_PreferSortDescending, 60.f);
         ImGui::TableSetupColumn("Mig/s",      ImGuiTableColumnFlags_WidthFixed, 60.f);
         ImGui::TableSetupColumn("P99 ms",     ImGuiTableColumnFlags_WidthFixed, 65.f);
         ImGui::TableSetupColumn("Pressure",   ImGuiTableColumnFlags_WidthFixed, 70.f);
         ImGui::TableSetupColumn("Affinity",   ImGuiTableColumnFlags_WidthFixed, 90.f);
+        ImGui::TableSetupColumn("WS(MB)",     ImGuiTableColumnFlags_WidthFixed, 65.f);
+        ImGui::TableSetupColumn("Advice",     ImGuiTableColumnFlags_WidthFixed, 80.f);
         ImGui::TableHeadersRow();
 
-        for (std::size_t i = 0u; i < targets.size(); ++i) {
+        // ── Client-side sort (clicking a header now reorders the rows) ────────
+        // targets[] and metrics[] are parallel; we sort an index array and
+        // render through it. Re-sorted every frame (≤64 rows → negligible).
+        const std::size_t n = targets.size();
+        static std::vector<int> order;
+        order.resize(n);
+        for (std::size_t i = 0u; i < n; ++i) order[i] = static_cast<int>(i);
+
+        if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
+            if (ss->SpecsCount > 0) {
+                auto mval = [&](int idx, int col) -> double {
+                    const bool has_m = (static_cast<std::size_t>(idx) < metrics.size());
+                    const auto* m = has_m ? &metrics[idx] : nullptr;
+                    switch (col) {
+                        case 0: return static_cast<double>(targets[idx].pid);
+                        case 2: return static_cast<double>(targets[idx].kind);
+                        case 3: return m ? m->cpu_usage_pct : 0.0;
+                        case 4: return m ? static_cast<double>(m->migrations_per_sec) : 0.0;
+                        case 5: return m ? m->frame_time_p99_ms : 0.0;
+                        case 6: return m ? static_cast<double>(m->pressure_level) : 0.0;
+                        case 7: return m ? static_cast<double>(m->allowed_core_mask) : 0.0;
+                        case 8: return m ? static_cast<double>(m->working_set_mb) : 0.0;
+                        case 9: return m ? static_cast<double>(m->advice_ccd) : 0.0;
+                        default: return 0.0;
+                    }
+                };
+                std::sort(order.begin(), order.end(), [&](int a, int b) {
+                    for (int s = 0; s < ss->SpecsCount; ++s) {
+                        const ImGuiTableColumnSortSpecs& sp = ss->Specs[s];
+                        const int col = sp.ColumnIndex;
+                        int cmp = 0;
+                        if (col == 1) {  // Name column — string compare
+                            cmp = std::strcmp(targets[a].name, targets[b].name);
+                        } else {
+                            const double va = mval(a, col), vb = mval(b, col);
+                            cmp = (va < vb) ? -1 : (va > vb) ? 1 : 0;
+                        }
+                        if (cmp != 0)
+                            return (sp.SortDirection == ImGuiSortDirection_Ascending)
+                                   ? (cmp < 0) : (cmp > 0);
+                    }
+                    return a < b;  // stable tiebreak
+                });
+            }
+        }
+
+        for (std::size_t k = 0u; k < n; ++k) {
+            const std::size_t i = static_cast<std::size_t>(order[k]);
             const auto& t = targets[i];
             ImGui::TableNextRow();
 
@@ -115,9 +230,56 @@ inline void draw_targets_panel(const PhynnedAppState& s,
             ImGui::TableSetColumnIndex(0);
             ImGui::Text("%u", t.pid);
 
-            // Name
+            // Name — right-click opens the W3 per-process user-rule menu.
             ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(t.name[0] ? t.name : "<unknown>");
+            {
+                char sel_id[80];
+                std::snprintf(sel_id, sizeof(sel_id), "%s##trow%u",
+                              t.name[0] ? t.name : "<unknown>",
+                              static_cast<unsigned>(i));
+                ImGui::Selectable(sel_id, false,
+                                  ImGuiSelectableFlags_SpanAllColumns);
+                char ctx_id[24];
+                std::snprintf(ctx_id, sizeof(ctx_id), "##tctx%u",
+                              static_cast<unsigned>(i));
+                if (ImGui::BeginPopupContextItem(ctx_id)) {
+                    auto* mac = const_cast<phynned::ipc::PhynnedClient*>(ac);
+                    ImGui::Text("User rule for %s (pid %u):",
+                                t.name[0] ? t.name : "<unknown>", t.pid);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Never optimize")) {
+                        (void)mac->send_command(
+                            phynned::ipc::kPhynnedCmdSetProcessRule, t.pid, 0ull);
+                    }
+                    if (ImGui::MenuItem("Always -> Freq CCD")) {
+                        (void)mac->send_command(
+                            phynned::ipc::kPhynnedCmdSetProcessRule, t.pid, 1ull);
+                    }
+                    if (ImGui::MenuItem("Always -> V-Cache CCD")) {
+                        (void)mac->send_command(
+                            phynned::ipc::kPhynnedCmdSetProcessRule, t.pid, 2ull);
+                    }
+                    ImGui::Separator();
+                    // Clear rule: find the published slot by exe name.
+                    const auto urules = ac->user_rules();
+                    int slot = -1;
+                    for (uint32_t r = 0u;
+                         r < static_cast<uint32_t>(urules.size()); ++r) {
+                        if (ci_eq_name(urules[r].name, t.name)) {
+                            slot = static_cast<int>(r); break;
+                        }
+                    }
+                    if (slot < 0) ImGui::BeginDisabled();
+                    if (ImGui::MenuItem("Clear rule")) {
+                        (void)mac->send_command(
+                            phynned::ipc::kPhynnedCmdRemoveProcessRule, 0u,
+                            static_cast<uint64_t>(slot),
+                            static_cast<uint64_t>(ac->user_rules_generation()));
+                    }
+                    if (slot < 0) ImGui::EndDisabled();
+                    ImGui::EndPopup();
+                }
+            }
 
             // Kind — t.kind es phynned::observer::TargetKind (enum class uint8_t)
             ImGui::TableSetColumnIndex(2);
@@ -161,15 +323,105 @@ inline void draw_targets_panel(const PhynnedAppState& s,
                     ImGui::PopStyleColor();
                 }
 
-                // Affinity mask (hex)
+                // Affinity mask (hex) — green when Phynned is routing this proc;
+                // "observed" (dim) when it is tracked but untouched.
                 ImGui::TableSetColumnIndex(7);
-                if (m.allowed_core_mask != 0u)
+                if (m.allowed_core_mask != 0u) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4{0.30f, 0.90f, 0.40f, 1.f});
                     ImGui::Text("0x%08X", m.allowed_core_mask);
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::TextDisabled("observed");
+                }
+
+                // Working set (MB) — the RouteAdvisor's 32/96 MB proxy input.
+                ImGui::TableSetColumnIndex(8);
+                if (m.working_set_mb > 0u)
+                    ImGui::Text("%u", m.working_set_mb);
                 else
-                    ImGui::TextDisabled("default");
+                    ImGui::TextDisabled("--");
+
+                // Advice (MR-1 shadow router) — the recommended CCD, colored.
+                // This is ADVICE ONLY: nothing is placed by it. Hover shows the
+                // confidence + a reminder that it is a shadow recommendation.
+                // W3: if the process has a user rule, its badge takes this cell
+                // (a REAL user decision, distinct from the shadow advice).
+                ImGui::TableSetColumnIndex(9);
+                const phynned::ipc::UserRuleShm* urule = nullptr;
+                {
+                    const auto url = ac->user_rules();
+                    for (const auto& u : url) {
+                        if (ci_eq_name(u.name, t.name)) { urule = &u; break; }
+                    }
+                }
+                if (urule != nullptr) {
+                    const uint8_t ua = urule->action;
+                    const ImVec4 ucol = (ua == 1u)
+                        ? ImVec4{1.00f, 0.65f, 0.25f, 1.f}      // Freq (orange)
+                        : (ua == 2u)
+                            ? ImVec4{0.45f, 0.75f, 1.00f, 1.f}  // VCache (cyan)
+                            : ImVec4{0.85f, 0.45f, 0.90f, 1.f}; // never (violet)
+                    ImGui::PushStyleColor(ImGuiCol_Text, ucol);
+                    ImGui::TextUnformatted(ua == 1u ? "user:Freq"
+                                         : ua == 2u ? "user:VCache" : "never");
+                    ImGui::PopStyleColor();
+                    if (urule->flags & phynned::ipc::kUserRuleFlagBlockedAc) {
+                        ImGui::SameLine();
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4{0.95f, 0.30f, 0.25f, 1.f});
+                        ImGui::TextUnformatted("AC");
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Refused by the anti-cheat gate "
+                                              "(R1) — no placement applied.");
+                    }
+                    if (urule->flags & phynned::ipc::kUserRuleFlagFlapWarn) {
+                        ImGui::SameLine();
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4{0.95f, 0.75f, 0.20f, 1.f});
+                        ImGui::TextUnformatted("!pin");
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Skipped — pinned by another "
+                                              "affinity manager (R4 flap guard).");
+                    }
+                } else if (m.advice_ccd == 3u) {
+                    // MR-2 would-corral marker. In DRY-RUN nothing is applied; the
+                    // Policies tab shows whether the corral is DRY-RUN or LIVE.
+                    ImGui::PushStyleColor(ImGuiCol_Text, advice_ccd_color(3u));
+                    ImGui::TextUnformatted(advice_ccd_str(3u));
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Would-corral: this active background process is on the\n"
+                            "V-Cache CCD and is not cache-advised, so the corral WOULD\n"
+                            "move it to the frequency CCD (mask 0xFFFF0000) to keep the\n"
+                            "V-Cache clean. Applied only if the corral switch is LIVE\n"
+                            "(Policies tab) — DRY-RUN by default = nothing placed.\n"
+                            "Current affinity 0x%08X, working set %u MB.",
+                            m.current_core_mask, m.working_set_mb);
+                    }
+                } else if (m.advice_ccd != 0u) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          advice_ccd_color(m.advice_ccd));
+                    ImGui::TextUnformatted(advice_ccd_str(m.advice_ccd));
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Shadow recommendation: route to %s (confidence %u%%).\n"
+                            "Heuristic proxy from working set (%u MB) vs the 32/96 MB\n"
+                            "L3 boundaries — nothing is placed. The A/B arbiter (MR-3)\n"
+                            "is the ground truth.",
+                            advice_ccd_str(m.advice_ccd),
+                            m.advice_confidence, m.working_set_mb);
+                    }
+                } else {
+                    ImGui::TextDisabled("--");
+                }
             } else {
                 // No metrics yet for this target
-                for (int c = 3; c <= 7; ++c) {
+                for (int c = 3; c <= 9; ++c) {
                     ImGui::TableSetColumnIndex(c);
                     ImGui::TextDisabled("--");
                 }

@@ -415,7 +415,10 @@ int main()
     cfg.window.height        = 800;
     cfg.window.resizable     = true;
     cfg.frame_arena_capacity = 2u * 1024u * 1024u;  // 2 MB (smaller than std_window)
-    cfg.profile              = phyriad::ProfileKind::BALANCED;
+    // POWER: paces the graph loop at 60 Hz (target_loop_hz) instead of the
+    // BALANCED unpaced spin that burned a full core (measured 107% → the
+    // dashboard's data only changes once per agent tick, ~1 Hz).
+    cfg.profile              = phyriad::ProfileKind::POWER;
     // Note: Phynned-ui talks to phynned-agent via shared memory (PhynnedClient),
     // not via a daemon process. The former Phyriad daemon pillar has been
     // retired - see AYAMA_MASTER_PLAN.md changelog.

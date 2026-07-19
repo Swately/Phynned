@@ -25,3 +25,6 @@ phynned-*-windows-x64.zip
 *.bak
 *.rej
 *.orig
+
+# tool binaries built ad-hoc
+tools/hwinfo_shm/*.exe

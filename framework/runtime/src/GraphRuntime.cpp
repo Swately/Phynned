@@ -403,7 +403,31 @@ void GraphRuntime::run() noexcept {
     // this thread was scheduled.  Resetting would create a race where a
     // stop() call before run() starts goes unnoticed.
 
+    // ── Outer-loop pacing (profile.target_loop_hz, 0 = unpaced) ──────────
+    // Caps the whole single-threaded loop (poll → logic → render → present)
+    // at a fixed rate. Without it the idle branch only yields, which on a
+    // quiet box returns immediately → the loop spins a full core even when
+    // the UI's data changes once per second (measured 107% of a core on the
+    // Phynned dashboard; 60 Hz pacing is imperceptible there).
+    using pace_clock = std::chrono::steady_clock;
+    const bool paced = impl.profile.target_loop_hz > 0u;
+    const auto period = paced
+        ? std::chrono::nanoseconds(1'000'000'000ull /
+                                   impl.profile.target_loop_hz)
+        : std::chrono::nanoseconds{0};
+    auto next_frame = pace_clock::now();
+
     while (!hal::ctrl_load_acquire(impl.stop_flag)) {
+        if (paced) {
+            next_frame += period;
+            const auto now = pace_clock::now();
+            if (next_frame > now) {
+                std::this_thread::sleep_until(next_frame);
+            } else {
+                next_frame = now;   // fell behind — don't accumulate debt
+            }
+        }
+
         bool any_work = false;
 
         for (uint32_t nid : impl.tick_order) {

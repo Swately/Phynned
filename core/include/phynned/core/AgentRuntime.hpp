@@ -48,7 +48,15 @@ struct AgentConfig {
     /// the UI's Start button to opt in.
     bool     start_active           {false};
 
-    uint8_t  _pad[4]              {};
+    /// MR-2: start the background corral in LIVE mode instead of the safe
+    /// DRY-RUN default. Intended ONLY for the supervisor's controlled self-test
+    /// (`--corral-live`). The standard path leaves this false → the corral
+    /// computes/surfaces what it WOULD place but applies nothing until the UI
+    /// switch (or this flag) turns it on. Coexistence detection (E5) can still
+    /// force DRY-RUN at runtime regardless of this default.
+    bool     corral_live_default    {false};
+
+    uint8_t  _pad[3]              {};
 };
 static_assert(sizeof(AgentConfig) <= 64u);
 

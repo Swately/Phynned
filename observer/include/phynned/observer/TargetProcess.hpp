@@ -46,23 +46,35 @@ static_assert(sizeof(TargetProcess)         == 64,  "TargetProcess must be 64B")
 static_assert(alignof(TargetProcess)        == 8,   "TargetProcess must be 8B-aligned");
 static_assert(__is_trivially_copyable(TargetProcess),  "TargetProcess must be trivially copyable");
 
-/// Maximum number of simultaneously observed targets.
+/// Maximum number of simultaneously observed targets (INTERNAL tracking cap).
 ///
 /// Bump history:
 ///   - 32 (original): sufficient for casual user with 1 game + 2-3 background apps
 ///   - 64 (bug #18): a single real streamer (Chrome 8 + Code 8 + Discord 6 + msedgewebview2 6
 ///     + obs64 1 + ...) consumed all 32 slots before the game (Minecraft with high PID)
 ///     could enter the table. With 64 slots + per-name cap=8, 8 unique exe names fit.
+///   - 1024 (MASS-router, BR1, 2026-07-17): detection inverted from pattern-gated to
+///     track-all-touchable. Hundreds of background processes are now OBSERVED (not
+///     necessarily placed). Sized to phyriad::proc::kMaxProcesses (1024) so a busy box
+///     is never truncated. This is an INTERNAL cap only — the agent↔UI SHM view stays
+///     bounded at `kMaxShmTargets` (below), decoupling mass-scale from the UI contract.
 ///
-/// Constraint: SHM layout (PhynnedShmLayout) uses kMaxTargets for
-/// `targets[]` and `metrics[]` arrays. At 64 slots:
+/// NOTE: this cap no longer sizes the SHM `targets[]`/`metrics[]` arrays — those use
+/// `kMaxShmTargets`. Widening kMaxTargets therefore does NOT change the SHM layout size.
+inline constexpr uint32_t kMaxTargets = 1024u;
+
+/// Maximum number of targets PUBLISHED into the agent↔UI shared memory (the UI
+/// contract). The UI needs only a bounded "top-N interesting" view — it never needs
+/// the full mass set. Kept at 64 so the SHM layout (PhynnedShmLayout) is byte-for-byte
+/// unchanged across the MASS widening:
 ///   targets[64]  = 64 × 64  = 4096 B (exactly 1 page)
 ///   metrics[64]  = 64 × 128 = 8192 B (2 pages)
-/// Total SHM usado: ~20 KB de 1 MB mapping → 2% utilizado, sobra mucho.
+/// The agent selects the top-`kMaxShmTargets` (placed/active/highest-activity) each tick
+/// and copies only those into the SHM; the full 1024-deep set is tracked internally.
 ///
 /// NOT bound by `phyriad::schema::PodMessage` 4096B limit — el SHM layout no es
 /// PodMessage (no cruza `phyriad::ipc::Ring<T>` ni `phyriad::transport::Latest<T>`).
-inline constexpr uint32_t kMaxTargets = 64u;
+inline constexpr uint32_t kMaxShmTargets = 64u;
 
 } // namespace phynned::observer
 // Made with my soul - Swately <3

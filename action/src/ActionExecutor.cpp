@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -28,14 +29,43 @@ ActionExecutor::ActionExecutor() noexcept {
     active_.fill(ActiveAction{});
     active_threads_.fill(ActiveThreadAction{});
 
-    // compute the system-wide default affinity mask once. Used
-    // by revert() instead of the per-action captured prev_mask, which may be
-    // residual pinning from a previous Phynned session that crashed.
+    // compute the system-wide default affinity mask once. Used as the clamp for
+    // apply_differential_pin's ~0ull sentinel + the revert target for the
+    // non-journaled differential-pin thread actions (see header INVARIANT note).
     const uint32_t n = phyriad::hw::topology().logical_core_count();
     if (n == 0u || n >= 64u) {
         default_affinity_mask_ = ~0ull;          // all 64 bits
     } else {
         default_affinity_mask_ = (1ull << n) - 1ull;  // low-n bits set
+    }
+
+    // ── DR1: open the crash-durable revert journal + reconcile residual ──────
+    // This runs at agent construction — BEFORE AgentRuntime's tick loop. A prior
+    // instance that died to `taskkill /f` (RAII ~ActionExecutor never ran) left
+    // its placements on the target processes AND a durable APPLIED/PENDING record
+    // per placement. recover() hands each surviving record back; we revert every
+    // one whose live process STILL MATCHES (pid + creation-time + exe) to its
+    // CAPTURED prev mask, then flip it REVERTED. A recycled PID fails
+    // process_still_matches() → dropped, never clobbered.
+    if (journal_.open(RevertJournal::default_path().c_str())) {
+        const std::vector<RevertRecord> residual = journal_.recover();
+        for (const RevertRecord& rec : residual) {
+            if (!RevertJournal::process_still_matches(rec)) {
+                // Stale record (process gone or PID recycled) — do NOT touch.
+                journal_.mark_reverted(RevertKey{rec.pid, rec.creation_time});
+                continue;
+            }
+            if (rec.prev_mask != 0ull) {
+                (void)phyriad::hw::set_process_affinity(rec.pid, rec.prev_mask);
+                std::fprintf(stdout,
+                    "[Phynned] Recover: pid=%u exe=%s restored to captured prev=0x%llx "
+                    "(was 0x%llx)\n",
+                    rec.pid, rec.exe_name,
+                    static_cast<unsigned long long>(rec.prev_mask),
+                    static_cast<unsigned long long>(rec.new_mask));
+            }
+            journal_.mark_reverted(RevertKey{rec.pid, rec.creation_time});
+        }
     }
 }
 
@@ -68,10 +98,11 @@ void ActionExecutor::log_entry(const ActiveAction& a, bool success,
     e.prev_affinity_mask = a.prev_affinity_mask;
     e.prev_priority_class= a.prev_priority_class;
     // On apply: records the mask actually written, not zero.
-    // On revert: new_affinity_mask is the system-default mask (what was
-    // actually applied). prev_affinity_mask keeps the captured pre-Phynned
-    // value so audit shows any drift transparently.
-    e.new_affinity_mask  = is_revert ? default_affinity_mask_  : a.new_affinity_mask;
+    // On revert (DR1): new_affinity_mask is the CAPTURED prev mask — what was
+    // actually restored (revert-to-captured-prev, no longer the all-cores
+    // default). prev == new on a revert row now, which is exactly right: the
+    // audit shows the target returned to its true pre-Phynned affinity.
+    e.new_affinity_mask  = is_revert ? a.prev_affinity_mask   : a.new_affinity_mask;
     e.new_priority_class = is_revert ? a.prev_priority_class : a.new_priority_class;
     e.success            = success ? 1u : 0u;
     // push_unchecked: circular-overwrite semantics matching the old ActionLogRing.
@@ -82,23 +113,6 @@ void ActionExecutor::log_entry(const ActiveAction& a, bool success,
 }
 
 // ── Platform-level apply operations ──────────────────────────────────────
-std::expected<void, phyriad::Error>
-ActionExecutor::apply_pin_affinity(uint32_t pid, uint64_t mask,
-                                    uint64_t& out_prev_mask) noexcept {
-    // phyriad::hw::set_process_affinity (FR-3) reads the previous mask and applies
-    // the new one atomically — returns the old mask on success.
-    auto r = phyriad::hw::set_process_affinity(pid, mask);
-    if (!r) {
-        std::fprintf(stderr,
-            "[Phynned][ActionExecutor] set_process_affinity(pid=%u, mask=0x%llx) failed: %d\n",
-            pid, static_cast<unsigned long long>(mask),
-            static_cast<int>(r.error().code));
-        return std::unexpected(r.error());
-    }
-    out_prev_mask = *r;
-    return {};
-}
-
 std::expected<void, phyriad::Error>
 ActionExecutor::apply_set_priority(uint32_t pid, uint32_t pclass,
                                     uint32_t& out_prev_pclass) noexcept {
@@ -115,9 +129,17 @@ ActionExecutor::apply_set_priority(uint32_t pid, uint32_t pclass,
     return {};
 }
 
-// ── apply() ───────────────────────────────────────────────────────────────
+// ── apply() — 1-arg convenience (self-queries exe/creation for the journal) ─
 std::expected<void, phyriad::Error>
 ActionExecutor::apply(const policy::PolicyDecision& d) noexcept {
+    return apply(d, nullptr, 0ull);
+}
+
+// ── apply() — DR1 overload (exe_name + creation_time plumbed) ──────────────
+std::expected<void, phyriad::Error>
+ActionExecutor::apply(const policy::PolicyDecision& d,
+                      const char* exe_name,
+                      uint64_t    creation_time) noexcept {
     using policy::ActionKind;
 
     // If there's already an active action for this PID, skip (already applied).
@@ -136,18 +158,59 @@ ActionExecutor::apply(const policy::PolicyDecision& d) noexcept {
     bool success = false;
 
     if (d.action_kind == ActionKind::PinAffinity) {
-        auto r = apply_pin_affinity(d.target_pid, d.core_mask,
-                                    a.prev_affinity_mask);
+        // ── DR1: capture prev BEFORE the Set* (write-ahead ordering) ─────────
+        // hw::get_process_affinity reads the current mask without modifying it —
+        // this is the CAPTURED prev, the revert target. If it fails (proc gone /
+        // no access) prev stays 0 → revert is a no-op (a zero mask is rejected).
+        uint64_t prev = 0ull;
+        if (auto gp = phyriad::hw::get_process_affinity(d.target_pid)) prev = *gp;
+
+        // Journal key discriminators. TargetProcess carries neither field, so
+        // self-query whatever the caller did not plumb: creation-time survives
+        // PID recycle; the exe basename is a second reconciliation check.
+        const uint64_t ct = (creation_time != 0ull)
+            ? creation_time
+            : RevertJournal::query_creation_time(d.target_pid);
+        char namebuf[64] = {0};
+        const char* exe = exe_name;
+        if (exe == nullptr || exe[0] == '\0') {
+            if (RevertJournal::query_exe_basename(d.target_pid, namebuf, sizeof(namebuf)))
+                exe = namebuf;
+            else
+                exe = "";
+        }
+        a.creation_time      = ct;
+        a.prev_affinity_mask = prev;
+        std::snprintf(a.exe_name, sizeof(a.exe_name), "%s", exe);
+
+        // ── Write-ahead: PENDING record flushed to disk BEFORE the Set* ──────
+        if (journal_.is_open())
+            journal_.record_pending(d.target_pid, exe, ct, prev, d.core_mask);
+
+        // ── The Set* (FR-3) ──────────────────────────────────────────────────
+        auto r = phyriad::hw::set_process_affinity(d.target_pid, d.core_mask);
         if (r) {
             success = true;
             a.new_affinity_mask = d.core_mask;   // fix #12 — record applied mask
+            // Flip PENDING -> APPLIED now the Set* has actually landed.
+            if (journal_.is_open())
+                journal_.mark_applied(RevertKey{d.target_pid, ct});
             std::fprintf(stdout,
                 "[Phynned] PinAffinity: pid=%u mask=0x%llx (prev=0x%llx)\n",
                 d.target_pid,
                 static_cast<unsigned long long>(d.core_mask),
-                static_cast<unsigned long long>(a.prev_affinity_mask));
+                static_cast<unsigned long long>(prev));
         } else {
-            return r;
+            // Set failed: LEAVE the PENDING record. recover() on the next start
+            // reconciles it — process_still_matches() drops it if the PID/creation
+            // no longer match a live process, and if it does still match, prev ==
+            // the current affinity (we never changed it) so the revert is a
+            // harmless no-op restore. No orphaned-but-unrecorded placement.
+            std::fprintf(stderr,
+                "[Phynned][ActionExecutor] set_process_affinity(pid=%u, mask=0x%llx) failed: %d\n",
+                d.target_pid, static_cast<unsigned long long>(d.core_mask),
+                static_cast<int>(r.error().code));
+            return std::unexpected(r.error());
         }
     } else if (d.action_kind == ActionKind::SetPriority) {
         auto r = apply_set_priority(d.target_pid, d.priority_class,
@@ -306,24 +369,18 @@ void ActionExecutor::revert(uint32_t pid) noexcept {
     ActiveAction* a = find_active(pid);
     if (!a) return;
 
-    // Restore to system-default affinity, not the per-action captured mask.
-    // The captured mask may be a residual from a previous Phynned instance
-    // that crashed without calling revert_all(); restoring it would
-    // propagate the leak.
-    //
-    // Restoring to the system-wide default (all logical cores) guarantees
-    // clean state regardless of crash-recovery history. See ActiveAction.hpp
-    // member-comment for the tradeoff analysis.
-    //
-    // We still apply the revert only if the action actually changed affinity
-    // (prev_affinity_mask != 0 means apply() captured something — i.e. a
-    // PinAffinity action was executed for this PID).
+    // DR1 (S3): restore the per-action CAPTURED prev mask, not the all-cores
+    // default. This is now safe: the write-ahead journal + constructor recover()
+    // authoritatively reconcile a crashed prior instance's residual on start, so
+    // a live action's `prev_affinity_mask` is genuinely the target's true
+    // pre-Phynned affinity — never a leaked residual. We revert only if the
+    // action actually captured something (prev_affinity_mask != 0; a zero mask
+    // is also rejected by set_process_affinity, so nothing to restore).
     if (a->prev_affinity_mask != 0ull) {
-        (void)phyriad::hw::set_process_affinity(pid, default_affinity_mask_);
+        (void)phyriad::hw::set_process_affinity(pid, a->prev_affinity_mask);
         std::fprintf(stdout,
-            "[Phynned] Revert: pid=%u -> mask=0x%llx (default; captured prev=0x%llx)\n",
+            "[Phynned] Revert: pid=%u -> captured prev=0x%llx\n",
             pid,
-            static_cast<unsigned long long>(default_affinity_mask_),
             static_cast<unsigned long long>(a->prev_affinity_mask));
     }
 
@@ -332,6 +389,10 @@ void ActionExecutor::revert(uint32_t pid) noexcept {
     if (a->prev_priority_class != 0u) {
         (void)phyriad::hw::set_process_priority(pid, a->prev_priority_class);
     }
+
+    // DR1: flip the journal record to REVERTED so recover() won't re-revert it.
+    if (journal_.is_open())
+        journal_.mark_reverted(RevertKey{a->pid, a->creation_time});
 
     // Audit log: prev_affinity_mask in the entry keeps the originally captured
     // value (may be residual leak — visible to operators); new_affinity_mask
@@ -373,22 +434,82 @@ void ActionExecutor::revert_all() noexcept {
         ActiveAction& a = active_[i];
         if (!a.active) continue;
 
+        // DR1 (S3): restore the CAPTURED prev mask (see revert() for the
+        // now-safe invariant), then flip the journal record to REVERTED.
         if (a.prev_affinity_mask != 0ull) {
-            (void)phyriad::hw::set_process_affinity(a.pid, default_affinity_mask_);
+            (void)phyriad::hw::set_process_affinity(a.pid, a.prev_affinity_mask);
             std::fprintf(stdout,
-                "[Phynned] Revert: pid=%u -> mask=0x%llx "
-                "(default; captured prev=0x%llx)\n",
+                "[Phynned] Revert: pid=%u -> captured prev=0x%llx\n",
                 a.pid,
-                static_cast<unsigned long long>(default_affinity_mask_),
                 static_cast<unsigned long long>(a.prev_affinity_mask));
         }
         if (a.prev_priority_class != 0u) {
             (void)phyriad::hw::set_process_priority(a.pid, a.prev_priority_class);
         }
+        if (journal_.is_open())
+            journal_.mark_reverted(RevertKey{a.pid, a.creation_time});
         log_entry(a, true, true);
         a.active = false;
     }
     n_active_ = 0u;
+}
+
+// ── revert_by_rule_id() — selective revert (R3, use-modes) ─────────────────
+// Local ASCII case-insensitive compare for the optional exe filter (matches
+// ConfigStore's rule-matching semantics; exe names are ASCII basenames).
+static bool exe_ci_equal(const char* a, const char* b) noexcept {
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
+        if (ca != cb) return false;
+        ++a; ++b;
+    }
+    return *a == *b;
+}
+
+uint32_t ActionExecutor::revert_by_rule_id(uint32_t rule_id,
+                                           const char* exe_filter) noexcept {
+    uint32_t reverted = 0u;
+
+    // Per-action revert, filtered by rule_id (and optionally exe name). Same
+    // body as revert_all()'s process-level loop (restore CAPTURED prev, mark
+    // journal REVERTED, log), but only for matching rows. Compaction happens
+    // once at the end so indices are not shifted mid-iteration.
+    for (uint32_t i = 0u; i < n_active_; ++i) {
+        ActiveAction& a = active_[i];
+        if (!a.active || a.rule_id != rule_id) continue;
+        if (exe_filter != nullptr && !exe_ci_equal(a.exe_name, exe_filter))
+            continue;
+
+        if (a.prev_affinity_mask != 0ull) {
+            (void)phyriad::hw::set_process_affinity(a.pid, a.prev_affinity_mask);
+            std::fprintf(stdout,
+                "[Phynned] Revert(rule=%u): pid=%u -> captured prev=0x%llx\n",
+                rule_id, a.pid,
+                static_cast<unsigned long long>(a.prev_affinity_mask));
+        }
+        if (a.prev_priority_class != 0u) {
+            (void)phyriad::hw::set_process_priority(a.pid, a.prev_priority_class);
+        }
+        if (journal_.is_open())
+            journal_.mark_reverted(RevertKey{a.pid, a.creation_time});
+        log_entry(a, true, true);
+        a.active = false;
+        ++reverted;
+    }
+
+    // Compact the active table (drop the rows just marked inactive).
+    uint32_t write = 0u;
+    for (uint32_t i = 0u; i < n_active_; ++i) {
+        if (active_[i].active) {
+            if (write != i) active_[write] = active_[i];
+            ++write;
+        }
+    }
+    n_active_ = write;
+
+    return reverted;
 }
 
 // ── prune_dead() ──────────────────────────────────────────────────────────
@@ -475,6 +596,24 @@ uint32_t ActionExecutor::snapshot_log(ActionLogEntry* out,
 
 uint32_t ActionExecutor::active_count() const noexcept {
     return n_active_;
+}
+
+// ── active_applied_mask() — Fix A (MR-2) ──────────────────────────────────
+uint64_t ActionExecutor::active_applied_mask(uint32_t pid) const noexcept {
+    // Process-level actions (Rule 1, memory-sourced, MR-2 corral): the applied
+    // affinity mask is new_affinity_mask.
+    for (uint32_t i = 0u; i < n_active_; ++i) {
+        if (active_[i].active && active_[i].pid == pid) {
+            return active_[i].new_affinity_mask;
+        }
+    }
+    // Differential pins (Rule 7): the process-level mask Phynned applied.
+    for (uint32_t i = 0u; i < n_active_threads_; ++i) {
+        if (active_threads_[i].active && active_threads_[i].pid == pid) {
+            return active_threads_[i].applied_process_mask;
+        }
+    }
+    return 0ull;
 }
 
 } // namespace phynned::action

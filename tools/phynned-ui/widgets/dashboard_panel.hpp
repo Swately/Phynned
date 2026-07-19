@@ -442,7 +442,15 @@ inline void draw_dashboard_panel(const PhynnedAppState& s,
     ImGui::TextUnformatted("Activity (current cycle)");
     ImGui::Indent();
     {
-        ImGui::Text("Games detected:   %u", s.snap.target_count);
+        // MASS-router: the agent now observes every touchable process, not just
+        // games — so this is the full observed count (with the SHM-shown subset
+        // in parentheses when it is bounded). "Policies active" below is the
+        // count Phynned is actually routing.
+        if (s.snap.total_tracked > s.snap.target_count)
+            ImGui::Text("Processes observed: %u  (top %u shown)",
+                        s.snap.total_tracked, s.snap.target_count);
+        else
+            ImGui::Text("Processes observed: %u", s.snap.target_count);
         ImGui::Text("Decisions made:   %u", s.snap.decision_count);
         ImGui::Text("Policies active:  %u", s.snap.action_count);
 

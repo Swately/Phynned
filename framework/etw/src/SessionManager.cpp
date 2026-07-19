@@ -94,10 +94,14 @@ SessionManager::start(const char*                   session_name,
 
     session_handle_ = handle;
 
-    // Enable each requested provider.
+    // Enable each requested provider. rc is now CAPTURED (was discarded — the
+    // reason a wrong-GUID enable failed silently). A per-provider failure is
+    // non-fatal (some need a specific Windows version/privilege), but we count
+    // successes so start() can tell a fully-dead session from a partial one.
+    uint32_t enabled_ok = 0u;
     for (const auto& spec : providers) {
         GUID guid_copy = spec.guid;
-        EnableTraceEx2(
+        const ULONG erc = EnableTraceEx2(
             session_handle_,
             &guid_copy,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
@@ -106,8 +110,20 @@ SessionManager::start(const char*                   session_name,
             spec.match_all,
             0,         // timeout: 0 = asynchronous
             nullptr);  // ENABLE_TRACE_PARAMETERS: default
-        // Individual provider enable failure is non-fatal — log but continue.
-        // (Some providers require specific Windows versions or privileges.)
+        if (erc == ERROR_SUCCESS) ++enabled_ok;
+        else std::fprintf(stderr,
+            "[phyriad::etw] EnableTraceEx2 failed rc=%lu for provider "
+            "{%08lX-...} (non-fatal, continuing)\n",
+            erc, static_cast<unsigned long>(guid_copy.Data1));
+    }
+    hal::stat_store_relaxed(providers_enabled_, enabled_ok);
+    // A session with ZERO providers enabled delivers nothing — surface it so a
+    // caller (and the M0-S0 birth-event test) can distinguish it from a live one.
+    if (!providers.empty() && enabled_ok == 0u) {
+        std::fprintf(stderr,
+            "[phyriad::etw] WARNING: session '%s' started but 0/%zu providers "
+            "enabled — no events will arrive.\n",
+            session_name_, providers.size());
     }
 
     return {};

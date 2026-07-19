@@ -3,10 +3,16 @@
 #
 add_library(phynned_learn STATIC
     src/PerGameMemory.cpp
+    src/RouteAdvisor.cpp          # MR-1 shadow router (advice only; never places)
 )
 
 target_include_directories(phynned_learn PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # MR-1: RouteAdvisor uses the observer POD headers (TargetMetrics / TargetKind)
+    # only — no observer .cpp symbols — so we add the include path WITHOUT linking
+    # phynned_observer. This keeps learn decoupled (no heavy psapi/pdh/etw transitive
+    # deps, no link cycle) while the RouteAdvice value type crosses the module edge.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../observer/include
 )
 
 target_link_libraries(phynned_learn PUBLIC

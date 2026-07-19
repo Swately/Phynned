@@ -18,6 +18,13 @@
 #include <cassert>
 #include <cstdio>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
 int main() {
     using namespace phynned::action;
     using namespace phynned::policy;
@@ -91,6 +98,59 @@ int main() {
         assert(n == 0u);
         std::printf("[OK] snapshot_log() empty on new executor\n");
     }
+
+    // ── Test 7: Fix A part 2 — active_applied_mask reflects a real apply ──────
+    // Spawns a benign child (ping), applies a PinAffinity to it, and verifies
+    // active_applied_mask() returns the applied mask (this is exactly what
+    // AgentRuntime §6c copies into TargetMetrics::allowed_core_mask each tick to
+    // drive the UI "routed" signal), then clears to 0 on revert. Setting affinity
+    // on our OWN child needs no admin. Skipped gracefully if the spawn fails.
+#ifdef _WIN32
+    {
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        wchar_t cmd[] = L"ping -n 30 127.0.0.1";  // ~30 s idle child
+        const BOOL spawned = CreateProcessW(
+            nullptr, cmd, nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        if (spawned) {
+            const uint32_t child_pid = static_cast<uint32_t>(pi.dwProcessId);
+            ActionExecutor exec;
+            PolicyDecision d{};
+            d.target_pid  = child_pid;
+            d.action_kind = ActionKind::PinAffinity;
+            d.core_mask   = 0x3ull;   // cores 0-1 (valid on any multicore box)
+            d.rule_id     = 1u;
+
+            // Before apply: no active action → mask 0.
+            assert(exec.active_applied_mask(child_pid) == 0ull);
+
+            const auto r = exec.apply(d, "ping.exe", 0ull);
+            assert(r.has_value());
+            assert(exec.active_count() == 1u);
+            assert(exec.active_applied_mask(child_pid) == 0x3ull);
+            std::printf("[OK] active_applied_mask reflects applied mask 0x%llX "
+                        "after apply (pid=%u)\n",
+                        static_cast<unsigned long long>(
+                            exec.active_applied_mask(child_pid)),
+                        child_pid);
+
+            // After revert: mask cleared to 0 (→ allowed_core_mask cleared).
+            exec.revert(child_pid);
+            assert(exec.active_applied_mask(child_pid) == 0ull);
+            assert(exec.active_count() == 0u);
+            std::printf("[OK] active_applied_mask cleared to 0 after revert\n");
+
+            TerminateProcess(pi.hProcess, 0u);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            std::printf("[SKIP] Test 7: could not spawn child (err=%lu)\n",
+                        GetLastError());
+        }
+    }
+#endif
 
     std::printf("\n[PASS] action_executor_test\n");
     return 0;

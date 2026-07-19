@@ -44,13 +44,17 @@ public:
     // ── Read-only views — valid while connected() ─────────────────────────
     [[nodiscard]] std::span<const observer::TargetProcess> targets() const noexcept {
         if (!layout_) return {};
-        const uint32_t n = layout_->state.n_targets;
+        // Clamp to the SHM view cap — the agent publishes at most kMaxShmTargets,
+        // but clamp defensively so a torn/garbage count can never read OOB.
+        uint32_t n = layout_->state.n_targets;
+        if (n > observer::kMaxShmTargets) n = observer::kMaxShmTargets;
         return {layout_->targets, n};
     }
 
     [[nodiscard]] std::span<const observer::TargetMetrics> metrics() const noexcept {
         if (!layout_) return {};
-        const uint32_t n = layout_->state.n_targets;
+        uint32_t n = layout_->state.n_targets;
+        if (n > observer::kMaxShmTargets) n = observer::kMaxShmTargets;
         return {layout_->metrics, n};
     }
 
@@ -62,6 +66,23 @@ public:
 
     [[nodiscard]] const PhynnedStateHeader* state() const noexcept {
         return layout_ ? &layout_->state : nullptr;
+    }
+
+    // ── W3 per-process user rules (read-only view) ────────────────────────
+    /// Published user rules table. Valid while connected(). The count is clamped
+    /// defensively so a torn/garbage count can never read out of bounds.
+    [[nodiscard]] std::span<const UserRuleShm> user_rules() const noexcept {
+        if (!layout_) return {};
+        uint32_t n = layout_->user_rules.n_rules;
+        if (n > kMaxUserRulesShm) n = kMaxUserRulesShm;
+        return {layout_->user_rules.rules, n};
+    }
+
+    /// Generation counter of the user rules table (bumps on every mutation).
+    /// The UI passes this back with a RemoveProcessRule command so a stale
+    /// slot index (rules changed since the UI last read) is rejected.
+    [[nodiscard]] uint32_t user_rules_generation() const noexcept {
+        return layout_ ? layout_->user_rules.generation : 0u;
     }
 
     /// Drain new action log entries since the last call to drain_actions().

@@ -9,6 +9,9 @@
 //
 // Usage:
 //   phynned-agent.exe [--verbose] [--no-selfpin] [--require-admin]
+//                     [--start-active] [--corral-live]
+//   --corral-live: MR-2 supervisor self-test — start the background corral LIVE
+//                  (applies real affinity). Omit for the safe DRY-RUN default.
 //
 // Exit codes:
 //   0 — clean shutdown
@@ -156,6 +159,9 @@ struct CliArgs {
     // --start-active opts out of the safe-default paused state
     // (see AgentRuntime::start() for rationale).
     bool start_active  {false};
+    // --corral-live: MR-2 supervisor self-test only. Starts the background
+    // corral in LIVE mode (applies real affinity). Default OFF → DRY-RUN.
+    bool corral_live   {false};
 };
 
 static CliArgs parse_args(int argc, char* argv[]) noexcept {
@@ -165,6 +171,7 @@ static CliArgs parse_args(int argc, char* argv[]) noexcept {
         if (std::strcmp(argv[i], "--no-selfpin")    == 0) a.no_selfpin    = true;
         if (std::strcmp(argv[i], "--require-admin") == 0) a.require_admin = true;
         if (std::strcmp(argv[i], "--start-active")  == 0) a.start_active  = true;
+        if (std::strcmp(argv[i], "--corral-live")   == 0) a.corral_live   = true;
     }
     return a;
 }
@@ -218,6 +225,7 @@ int main(int argc, char* argv[]) {
     cfg.self_pin_to_slow_cores = !cli.no_selfpin;
     cfg.enable_shm_publish    = true;
     cfg.start_active          = cli.start_active;
+    cfg.corral_live_default   = cli.corral_live;  // MR-2: default false → DRY-RUN
 
     // ── Create and start runtime ──────────────────────────────────────────
     phynned::core::AgentRuntime runtime(cfg);

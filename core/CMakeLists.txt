@@ -82,5 +82,21 @@ if(PHYNNED_BUILD_TESTS)
         add_test(NAME agent_idle_budget_test COMMAND agent_idle_budget_test)
         set_tests_properties(agent_idle_budget_test PROPERTIES TIMEOUT 30)
     endif()
+
+    # ── Use-modes §5 tests 4 & 5 — R1 (AC gate) + R4 (flap guard) ──────────────
+    # Pure evaluate_user_pin decision + the real AcProbe class-c refusal. No admin.
+    add_executable(use_modes_test tests/use_modes_test.cpp)
+    # phynned_config linked directly: the test exercises find_user_rule_for
+    # (UserRuleLookup.hpp), which consumes ConfigStore — config is PRIVATE to
+    # phynned_core, so its include dir does not propagate.
+    target_link_libraries(use_modes_test PRIVATE phynned_core phynned_config)
+    target_compile_features(use_modes_test PRIVATE cxx_std_23)
+    if(NOT MSVC)
+        target_compile_options(use_modes_test PRIVATE -Wall -Wextra)
+    endif()
+    if(CMAKE_TESTING_ENABLED OR PHYNNED_BUILD_TESTS)
+        enable_testing()
+        add_test(NAME use_modes_test COMMAND use_modes_test)
+    endif()
 endif()
 # Made with my soul - Swately <3

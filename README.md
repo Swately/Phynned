@@ -5,7 +5,19 @@ with an A/B/A/B/A measurement protocol and a 14-test exploratory catalog on
 AMD X3D (provisional — see the evidence status below) — ready out-of-the-box
 for Intel hybrid (P+E) and non-X3D multi-CCD AMD.**
 
-> `0.1.0-experimental` · Windows · student-built, LLM-assisted.
+> `0.2.0-experimental` · Windows · student-built, LLM-assisted.
+
+> **0.2.0 — the mass-router milestone.** Phynned now observes **every
+> touchable process** (not just games), ships an anti-cheat–aware safety
+> gate proven against real AC titles (EAC / Vanguard classes probed
+> empirically; do-not-probe titles never receive a handle), a shadow CCD
+> advisor, an opt-in **background corral** (herds active non-game
+> background off the V-Cache CCD; disabling it reverts everything it did),
+> **persistent per-process user rules** (never / always→Freq /
+> always→V-Cache, right-click in the Targets tab), usage **profiles**
+> (Monitor / Games / Games+Corral), and a crash-safe revert journal.
+> Placement stays allowlist-gated and OFF by default: out of the box
+> 0.2.0 places exactly what 0.1.0 placed.
 
 > **Renamed from *Ayama* to *Phynned* on 2026-07-16** (phy + pinned — pinning
 > with the Phyriad lineage). The identifier-level rename landed the same day:

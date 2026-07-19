@@ -133,7 +133,13 @@ private:
     /// the event). Called from sample() / drain_etw_ring (consumer thread).
     [[nodiscard]] uint32_t lookup_pid_for_tid(uint32_t tid) const noexcept;
 
-    // ── Per-PID delta state (previous values for CPU % computation) ────────
+    // ── SLIM per-PID process-level state (~56 B) — one per TRACKED PID ─────
+    // MASS-router (2026-07-17, BR1): at track-all-touchable scale (kMaxTargets =
+    // 1024) the old fat PidState (~1 KB, dominated by the 64-entry per-thread
+    // hot-thread array) would cost ~1 MB for state the herd never needs. The fat
+    // per-thread tracking now lives in the separate `hot_track_` pool, claimed
+    // lazily only for the routing-relevant few. This slim record — process-level
+    // CPU%, thread count, migrations — is what EVERY observed PID needs.
     // prev_kernel_100ns / prev_user_100ns mirror ProcessMetrics::kernel/user
     // time fields (100ns units since process creation). prev_wall_ticks is a
     // QueryPerformanceCounter snapshot for wall-time denominator.
@@ -151,23 +157,39 @@ private:
         // pressure heuristic, and UI display).
         float    cached_cpu_pct;
         uint32_t cached_thread_count;
-        // Hot thread identification via DELTA time.
-        // We need to know which thread is CURRENTLY hot (highest CPU delta
-        // over the recent sample window), not which has the most lifetime
-        // accumulated time — the latter biases toward early-spawned threads
-        // (loaders) and produces unstable initial classifications.
-        //
-        // Storage per PidState:
-        //   - prev_threads[]: TID + (kernel+user)_100ns snapshot from prior
-        //     capture. On new capture, we look up each current thread by TID
-        //     and compute the delta. Linear search (n≤64).
-        //   - hot_tid_candidate / hot_tid_consecutive: confidence gate.
-        //     A new "candidate" must dominate 2 consecutive samples before
-        //     we commit it to cached_hot_tid. Prevents thrashing the
-        //     differential-pin policy on transient bursts.
-        //
-        // Memory: 64 entries × 16B = 1 KB per PidState. ×64 max targets
-        // = 64 KB total for thread profiling. Negligible.
+        // Working set (RSS) in MB, from ProcessMetrics::working_set_bytes. Cached
+        // like cpu_pct/thread_count so non-capture ticks emit a stable value. Feeds
+        // TargetMetrics::working_set_mb (surfaced 2026-07-17, MR-1 shadow router).
+        uint32_t cached_working_set_mb;
+        // Current process affinity mask (Fix A, MR-2 2026-07-17). Read once per
+        // capture tick via OpenProcess(QUERY_LIMITED)+GetProcessAffinityMask and
+        // cached so non-capture ticks emit a stable value. Feeds
+        // TargetMetrics::current_core_mask → the RouteAdvisor already_there test and
+        // the MR-2 corral "is this active bg process on the V-Cache CCD?" predicate.
+        // 0 = unknown (open denied / PPL / non-Windows).
+        uint32_t cached_current_core_mask;
+        // Handle into the fat hot-thread tracking pool (hot_track_). 0 = none;
+        // otherwise (slot index + 1). Claimed lazily on the first capture tick a
+        // process shows >= kHotTrackMinThreads threads (games/heavy apps only).
+        uint32_t hot_slot_plus_1;
+        bool     valid;
+    };
+    static_assert(sizeof(PidState) <= 64u,
+        "PidState must stay slim (~56B) — fat per-thread state lives in hot_track_");
+
+    // ── FAT hot-thread tracking (~1 KB) — pooled, the routed few only ─────
+    // Hot thread identification via DELTA time. We need which thread is CURRENTLY
+    // hot (highest CPU delta over the recent window), not which has the most
+    // lifetime accumulated time — the latter biases toward early-spawned loader
+    // threads and produces unstable classifications.
+    //   - prev_threads[]: TID + (kernel+user)_100ns snapshot from the prior
+    //     capture. On a new capture we look up each current thread by TID and
+    //     compute the delta. Linear search (n ≤ 64).
+    //   - hot_tid_candidate / hot_tid_consecutive: a confidence gate — a new
+    //     candidate must dominate kHotConfidenceMin consecutive samples before we
+    //     commit it to cached_hot_tid, preventing differential-pin thrashing.
+    struct HotTrackState {
+        uint32_t owner_pid;              // 0 = free slot
         static constexpr uint32_t kMaxTrackedThreads = 64u;
         struct ThreadDelta {
             uint32_t tid;
@@ -177,23 +199,42 @@ private:
         static_assert(sizeof(ThreadDelta) == 16u);
         std::array<ThreadDelta, kMaxTrackedThreads> prev_threads;
         uint32_t n_prev_threads;
-        // Confidence machinery:
         uint32_t hot_tid_candidate;      // TID with highest delta last sample
         uint8_t  hot_tid_consecutive;    // # consecutive samples same candidate
         uint8_t  _pad_b1[3];
-        // Committed value (only set after kHotConfidenceMin consecutive samples):
-        uint32_t cached_hot_tid;
-
-        bool     valid;
+        uint32_t cached_hot_tid;         // committed only after kHotConfidenceMin
     };
+
     /// Minimum consecutive samples a TID must dominate before we commit it
     /// as the hot_tid. With 500 ms capture cadence, value=2 means ~1 s of
     /// stability required — fast enough for short benchmarks, stable enough
     /// to avoid thrashing.
     static constexpr uint8_t kHotConfidenceMin = 2u;
-    static constexpr uint32_t kMaxPidStates = kMaxTargets;
+
+    // Slim state: one per observed PID (mass scale).
+    static constexpr uint32_t kMaxPidStates = kMaxTargets;  // 1024
     std::array<PidState, kMaxPidStates> pid_states_{};
     uint32_t n_pid_states_{0u};
+
+    // Fat hot-thread pool: only the busy, routing-relevant few. A process claims a
+    // slot lazily (acquire_hot_track) on its first capture tick with
+    // >= kHotTrackMinThreads threads; the idle mass herd never allocates one. 128
+    // comfortably exceeds the count of concurrently-busy multi-threaded desktop
+    // processes, so a game always gets a slot (its hot_tid path is unchanged).
+    static constexpr uint32_t kMaxHotTrackStates = 128u;
+    static constexpr uint32_t kHotTrackMinThreads = 8u;
+    std::array<HotTrackState, kMaxHotTrackStates> hot_track_{};
+    uint32_t n_hot_track_{0u};
+
+    // Off-stack scratch for the per-tick bulk NtQSI/proc extract (kMaxTargets ×
+    // 64B = 64 KB) — an Impl member, not a sample()-local, so the MASS cap does
+    // not put a 64 KB array on the run() thread stack.
+    std::array<phyriad::proc::ProcessMetrics, kMaxTargets> bulk_scratch_{};
+
+    /// Return the hot-track slot for `s`, claiming a free/new one on first use.
+    /// Returns nullptr when the pool is exhausted (hot-thread tracking is simply
+    /// skipped for that PID → hot_tid stays 0; graceful, never fatal).
+    HotTrackState* acquire_hot_track(PidState& s) noexcept;
 
     // Bulk-capture throttle counter. Init to interval so the very
     // first sample() triggers a capture (no blind window at startup).
@@ -205,28 +246,33 @@ private:
     // event. With hundreds–thousands of CSwitch events per tick × n=64 slots,
     // the linear scan was the #1 hot path (~2.5–5 ms/tick).
     //
-    // Open addressing with linear probing. Sized 128 (2× pid_states capacity)
-    // for ~50% max load factor — collisions are rare and probe chains short.
-    // Stores slot index + 1 so 0 means empty (PIDs are uint32 but slot indices
-    // fit in 7 bits, leaving room for the empty sentinel).
-    static constexpr uint32_t kPidHashSize = 128u;       // power of 2
+    // Open addressing with linear probing. Sized 2048 (2× pid_states capacity of
+    // 1024) for ~50% max load factor — collisions are rare and probe chains short.
+    // Stores slot index + 1 so 0 means empty.
+    //
+    // MASS-router (2026-07-17, BR1): slot_plus_1 widened uint8_t→uint16_t. At the
+    // old uint8_t width the map physically truncated past 254 distinct PIDs
+    // (slot_idx + 1 had to fit in 255); at track-all-touchable scale that silently
+    // dropped hundreds of processes from the O(1) metrics map. uint16_t holds the
+    // full 1024-deep slot space.
+    static constexpr uint32_t kPidHashSize = 2048u;      // power of 2, 2× kMaxPidStates
     static constexpr uint32_t kPidHashMask = kPidHashSize - 1u;
     struct PidHashEntry {
-        uint32_t pid;       // 0 = empty slot
-        uint8_t  slot_plus_1; // index into pid_states_ + 1; 0 = empty
+        uint32_t pid;         // 0 = empty slot
+        uint16_t slot_plus_1; // index into pid_states_ + 1; 0 = empty
     };
     std::array<PidHashEntry, kPidHashSize> pid_hash_{};
 
     // Insert (pid, slot_idx) into pid_hash_. Called from find_or_create.
     // Caller guarantees pid != 0 and !already-present. Probe-chain length is
     // bounded by load factor (max n_pid_states_/kPidHashSize ≈ 50%).
-    void pid_hash_insert(uint32_t pid, uint8_t slot_idx) noexcept {
+    void pid_hash_insert(uint32_t pid, uint16_t slot_idx) noexcept {
         uint32_t h = pid & kPidHashMask;
         for (uint32_t probe = 0u; probe < kPidHashSize; ++probe) {
             auto& e = pid_hash_[(h + probe) & kPidHashMask];
             if (e.pid == 0u) {
                 e.pid = pid;
-                e.slot_plus_1 = static_cast<uint8_t>(slot_idx + 1u);
+                e.slot_plus_1 = static_cast<uint16_t>(slot_idx + 1u);
                 return;
             }
         }

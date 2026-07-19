@@ -133,12 +133,19 @@ public:
         return hal::stat_load_relaxed(events_processed_);
     }
 
+    /// Number of providers that EnableTraceEx2 accepted in the last start().
+    /// 0 with a non-empty provider list = a dead session (the wrong-GUID trap).
+    [[nodiscard]] uint64_t providers_enabled() const noexcept {
+        return hal::stat_load_relaxed(providers_enabled_);
+    }
+
 private:
     TRACEHANDLE            session_handle_  {0};
     TRACEHANDLE            consumer_handle_ {0};  // 0 = not open
     HANDLE                 consumer_thread_ {nullptr};
     std::atomic<bool>      stop_flag_       {false};
     std::atomic<uint64_t>  events_processed_{0u};
+    std::atomic<uint64_t>  providers_enabled_{0u};
     EventCallback          cb_              {nullptr};
     void*                  user_ctx_        {nullptr};
     char                   session_name_    [128]{};
@@ -156,17 +163,31 @@ private:
 namespace providers {
 
 /// Microsoft-Windows-Kernel-Process (process/thread/image load events).
+/// FIXED 2026-07-17 (Phynned mass-router M0-S0): the previous value
+/// {0268A8B6-74FD-4302-9B4A-6EA0FBB19D9E} was WRONG — the session enabled a
+/// non-existent provider and ProcessStart (birth) events never arrived
+/// (the reason migrations/CSwitch diagnostics read ~0). The real GUID was
+/// verified first-hand on the box via `logman query providers`. Enable with
+/// keyword 0x10 (WINEVENT_KEYWORD_PROCESS) for ProcessStart/ProcessStop.
 inline constexpr GUID kKernelProcess{
-    0x0268a8b6u, 0x74fdu, 0x4302u,
-    {0x9bu, 0x4au, 0x6eu, 0xa0u, 0xfbu, 0xb1u, 0x9du, 0x9eu}};
+    0x22fb2cd6u, 0x0e7bu, 0x422bu,
+    {0xa0u, 0xc7u, 0x2fu, 0xadu, 0x1fu, 0xd0u, 0xe7u, 0x16u}};
+
+/// Keyword for kKernelProcess ProcessStart/ProcessStop (WINEVENT_KEYWORD_PROCESS).
+inline constexpr uint64_t kKernelProcessKeywordProcess = 0x10ull;
 
 /// Microsoft-Windows-Kernel-Thread (thread create/delete/rundown events).
 inline constexpr GUID kKernelThread{
     0x3d6fa8d1u, 0xfe05u, 0x11d0u,
     {0x9du, 0xdau, 0x00u, 0xc0u, 0x4fu, 0xd7u, 0xbau, 0x7cu}};
 
-/// Microsoft-Windows-Kernel-Dispatcher (context-switch events, level ≥ 4).
-/// Requires Windows 10 RS3+ or Server 2019+.
+/// Context-switch events. WARNING (2026-07-17): the value below
+/// {DEF2FE46-7BD6-4B80-BD94-F57FE20D0CE3} is StackWalkGuid, NOT a context-switch
+/// provider — CSwitch cannot come from it. The correct path is the System
+/// Scheduler logger under EVENT_TRACE_SYSTEM_LOGGER_MODE (GUID {599A2A76-...}),
+/// which needs session-mode changes. DEFERRED to the burst-PMC path (M1+); the
+/// mass-router's M0 needs only kKernelProcess (birth events). Do NOT rely on
+/// this constant until it is corrected with the system-logger work.
 inline constexpr GUID kKernelContextSwitch{
     0xdef2fe46u, 0x7bd6u, 0x4b80u,
     {0xbdu, 0x94u, 0xf5u, 0x7fu, 0xe2u, 0x0du, 0x0cu, 0xe3u}};
@@ -217,6 +238,7 @@ public:
     void stop_consumer() noexcept {}
 
     [[nodiscard]] uint64_t events_processed() const noexcept { return 0u; }
+    [[nodiscard]] uint64_t providers_enabled() const noexcept { return 0u; }
 };
 
 namespace providers {

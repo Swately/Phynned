@@ -19,6 +19,8 @@
 
 #include <phynned/learn/PerGameMemory.hpp>
 #include <phynned/learn/LearnedEntry.hpp>
+#include <phynned/learn/RouteAdvisor.hpp>          // MR-1 shadow router
+#include <phynned/observer/TargetMetrics.hpp>
 
 #include <cassert>
 #include <cstdio>
@@ -292,6 +294,62 @@ int main()
         mem.remove("Cyberpunk2077.exe");
         assert(mem.find("Cyberpunk2077.exe") == nullptr);
         std::printf("[OK] T8.10 remove() evicts entry\n");
+    }
+
+    // ── T-MR1: RouteAdvisor SHADOW ROUTER decision cutoffs ────────────────────
+    // Verifies the advisory CCD logic (advice only — the advisor has no path to
+    // any executor; this test only exercises the pure decision function).
+    {
+        using phynned::observer::TargetMetrics;
+        using phynned::observer::TargetKind;
+
+        RouteAdvisor advisor;  // caches the V-Cache mask from hw::v_cache_cores()
+
+        auto make = [](float cpu, uint32_t ws_mb) noexcept {
+            TargetMetrics m{};
+            m.cpu_usage_pct  = cpu;
+            m.working_set_mb = ws_mb;
+            return m;
+        };
+
+        if (advisor.v_cache_mask() == 0u) {
+            // Non-X3D / homogeneous box: advisor degrades to monitor-only.
+            const RouteAdvice a = advisor.advise(make(50.f, 50u),
+                                                 TargetKind::Productivity, false);
+            assert(a.ccd == RouteAdvice::Ccd::LeaveAlone);
+            std::printf("[OK] T-MR1  no-X3D box → monitor-only (LeaveAlone)\n");
+        } else {
+            // Idle herd (below 3% CPU) → LeaveAlone regardless of WS.
+            assert(advisor.advise(make(1.0f, 50u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::LeaveAlone);
+            // Active + WS in (32,96] → VCache (fits 96MB L3, spills 32MB freq-L3).
+            assert(advisor.advise(make(40.f, 64u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::VCache);
+            // Active + WS ≤ 32 → Frequency (cache-neutral, clock-bound).
+            assert(advisor.advise(make(40.f, 16u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::Frequency);
+            // Active + WS > 96 → DRAM-bound → LeaveAlone (conservative).
+            assert(advisor.advise(make(40.f, 512u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::LeaveAlone);
+            // Boundary: exactly 32MB → Frequency; exactly 96MB → VCache.
+            assert(advisor.advise(make(40.f, 32u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::Frequency);
+            assert(advisor.advise(make(40.f, 96u), TargetKind::Productivity, false)
+                       .ccd == RouteAdvice::Ccd::VCache);
+            // System process → never a candidate.
+            assert(advisor.advise(make(90.f, 64u), TargetKind::System, false)
+                       .ccd == RouteAdvice::Ccd::LeaveAlone);
+            // Game / pattern-eligible → managed elsewhere → LeaveAlone here.
+            assert(advisor.advise(make(90.f, 64u), TargetKind::Game, /*is_game_managed=*/true)
+                       .ccd == RouteAdvice::Ccd::LeaveAlone);
+            // Confidence is a modest proxy, never overclaimed (≤ 100, never 100).
+            const RouteAdvice vc = advisor.advise(make(40.f, 64u),
+                                                  TargetKind::Productivity, false);
+            assert(vc.confidence > 0u && vc.confidence < 100u);
+            std::printf("[OK] T-MR1  RouteAdvisor cutoffs "
+                        "(idle/VCache/Freq/DRAM/System/Game) verified; "
+                        "v_cache_mask=0x%08X\n", advisor.v_cache_mask());
+        }
     }
 
     std::printf("\nAll T8 tests passed.\n");

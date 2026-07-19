@@ -93,7 +93,8 @@ public:
         uint8_t                         deep_idle,
         uint8_t                         watchdog_ok,
         uint32_t                        ccd_defense_count,
-        float                           ccd_defense_cpu_pct
+        float                           ccd_defense_cpu_pct,
+        uint32_t                        n_tracked_total
     ) noexcept;
 
     /// Write bench_phase into the state header (called by ABRunner integration).
@@ -118,11 +119,31 @@ public:
     /// UI render Start vs Pause button state accurately.
     void set_policies_paused(uint8_t paused) noexcept;
 
+    /// MR-2: publish the background-corral mode into the state header. Called by
+    /// AgentRuntime every tick. `live` = the LIVE switch state (0 = DRY-RUN default);
+    /// `coexist_block` = 1 when a coexistence optimizer (AMD 3D V-Cache service /
+    /// Process Lasso) is detected, forcing DRY-RUN regardless of the switch (E5).
+    /// Effective mode is LIVE iff live && !coexist_block; the UI renders this.
+    void set_corral_mode(uint8_t live, uint8_t coexist_block) noexcept;
+
     /// Write the agent's own resource usage into the state header.
     /// Called by AgentRuntime after each SelfMonitor sample (~500 ms).
     /// Surfaces in the UI status bar so users can confirm Phynned isn't
     /// burning CPU on their machine.
     void set_self_resources(float cpu_pct, float rss_mb) noexcept;
+
+    /// W4: publish the global profile byte (config::Profile: 0=Monitor 1=Games
+    /// 2=GamesCorral 3=Full). Single-byte store — atomic on x86/ARM, no seqlock.
+    void set_profile(uint8_t profile) noexcept;
+
+    /// W3: publish the per-process user rules table for the UI. Copies up to
+    /// kMaxUserRulesShm rules + the count + generation into the SHM UserRulesBlock,
+    /// wrapped in the layout seqlock. Called by AgentRuntime; the rules change
+    /// rarely (on IPC command) but the flags (blocked_by_ac / flap_warn) update
+    /// per tick, so this is refreshed each publish.
+    void publish_user_rules(const UserRuleShm* rules,
+                            uint32_t           n_rules,
+                            uint32_t           generation) noexcept;
 
     /// Direct pointer to the command slot.
     /// Used by the agent main loop to poll for new UI commands each tick.

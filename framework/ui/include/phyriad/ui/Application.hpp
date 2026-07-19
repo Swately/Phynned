@@ -422,6 +422,10 @@ private:
             p.node_profiles.resize(n_nodes);
             p.ring_profiles.resize(n_wires);
             p.use_busy_wait_loop = false;
+            // Pace the whole single-threaded loop at 60 Hz: dashboard data
+            // changes ~1×/s, so an unpaced loop just burns a core (see
+            // GraphRuntime::run pacing note). ≤16 ms input latency.
+            p.target_loop_hz     = 60u;
             return p;
         }
         case phyriad::ProfileKind::BALANCED:

@@ -3,11 +3,21 @@
 **Provenance:** copied from `G:\phyriad\catalog\cpp` on **2026-07-16** during the Ayama
 separation (see `docs/plans/AYAMA_SEPARATION_MASTER_PLAN.md`).
 
-**This is Ayama's own base now.** It is deliberately a fork: modify these sources freely for
-Ayama's needs — that independence is the point of the separation (the PhyriadFG model). The
+**This is Phynned's own base now.** It is deliberately a fork: modify these sources freely for
+the project's needs — that independence is the point of the separation (the PhyriadFG model). The
 cost, accepted by the operator (risk `SR1`): fixes landing in `catalog/cpp` after 2026-07-16 do
-NOT reach this copy on their own, and nobody is watching the drift. A future session that wants
-substrate parity diffs against `catalog/cpp` deliberately, pillar by pillar.
+NOT reach this copy on their own, and nobody is watching the drift.
+
+**Operator directive 2026-07-17 — no catalog-parity discipline, no Phyriad code philosophy.**
+Phynned's code (this vendored `framework/` included) is explicitly NOT bound to Phyriad's
+substrate ENGINEERING philosophy — the `DOGMA_SPECIFICATIONS` D-1..D-21 (lock-free mandate, HAL
+discipline, zero-alloc hot paths, zero-overhead) do NOT govern here. Reshape these pillars,
+restructure them, or pick the simplest correct primitive (a `std::mutex` over a forced lock-free
+ring) as the project needs. There is **no obligation to keep this tree diffable against
+`catalog/cpp`** — the byte-parity framing below is retired; defects are simply fixed in Phynned's
+copy. (This releases the CODE philosophy only; the SESSION's conduct — verify-before-claim,
+calibrated reporting, the L3 safety gate, plan-tier — still binds, per BOOT §1, and so does the
+authorship signature.)
 
 **The 17 vendored units** (the dependency closure of Ayama's sources, settled by the linker,
 not by grep alone):
@@ -40,12 +50,20 @@ master plan §4, not resolved here. Re-vendor from `catalog/cpp` if a future fea
 
 Local `build/`, `_deps/`, `.cache/` directories were excluded from the copy.
 
-**Known inherited defects (faithfully copied, NOT migration-introduced, left as-is to keep
-the diff-vs-catalog clean):** the standalone-as-CMake-root fallback guards in
-`render/composite/CMakeLists.txt:32,35` (`../../../render`, `../../../schema` — wrong
-arithmetic, resolve to nonexistent paths) and `render/opengl3/CMakeLists.txt:15` (`../..`
-targets `framework/`, which has no CMakeLists). Both are **unreachable in Ayama's build**
-(the parent defines the targets before these guards are evaluated) and equally broken in the
-`catalog/cpp` original — a catalog defect, flagged upstream at the separation (2026-07-16).
+**Known inherited defects** (faithfully copied, NOT migration-introduced): the standalone-as-
+CMake-root fallback guards in `render/composite/CMakeLists.txt:32,35` (`../../../render`,
+`../../../schema` — wrong arithmetic, resolve to nonexistent paths) and
+`render/opengl3/CMakeLists.txt:15` (`../..` targets `framework/`, which has no CMakeLists). Both
+are **unreachable in Phynned's build** (the parent defines the targets before these guards are
+evaluated) and equally broken in the `catalog/cpp` original. **No longer left as-is for parity**
+(directive 2026-07-17): fix freely in Phynned's copy when convenient — the earlier "keep it
+diffable" reason is retired. Also on the free-fix list: the ETW provider-GUID defects in
+`etw/SessionManager.hpp` (the mass-router's S0 repair — no catalog coordination needed).
+
+**Note:** the identifier rename (2026-07-16, `ayama::`→`phynned::`) deliberately EXCLUDED
+`framework/**` so the tree stayed diffable against catalog at that moment; with the parity
+discipline now retired, the vendored pillars may be renamed/reshaped into Phynned's own idiom
+whenever a change touches them — there is no reason to preserve the `phyriad::` names beyond
+inertia, though a bulk rename is its own scoped task, not required.
 
 <!-- Made with my soul - Swately <3 -->

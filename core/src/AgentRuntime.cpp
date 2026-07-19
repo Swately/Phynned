@@ -10,6 +10,8 @@
 #include <phynned/core/AutoRevertGuard.hpp>
 #include <phynned/core/InternalWatchdog.hpp>
 #include <phynned/core/IdleWatch.hpp>
+#include <phynned/core/UserPinRule.hpp>   // W3 — pure user-pin decision (R1/R4)
+#include <phynned/core/UserRuleLookup.hpp> // W3 — rule lookup w/ lazy path resolve
 #include <phynned/observer/ProcessObserver.hpp>
 #include <phynned/observer/MetricsCollector.hpp>
 #include <phynned/observer/ProcessClassifier.hpp>
@@ -20,11 +22,15 @@
 #include <phynned/policy/PolicyEngine.hpp>
 #include <phynned/policy/AutoPolicySelector.hpp>
 #include <phynned/action/ActionExecutor.hpp>
+#include <phynned/action/AcProbe.hpp>          // CR1 — anti-cheat gate before any placement on a game
+#include <phynned/action/RevertJournal.hpp>    // DR1 — query_creation_time for the apply plumbing
+#include <phynned/observer/AcDriverOracle.hpp> // CR1 — zero-handle AC class oracle
 #include <phynned/action/AuditLog.hpp>
 #include <phynned/bench/ABRunner.hpp>
 #include <phynned/config/ConfigStore.hpp>
 #include <phynned/config/DefaultPolicyPack.hpp>
 #include <phynned/learn/PerGameMemory.hpp>
+#include <phynned/learn/RouteAdvisor.hpp>       // MR-1 — SHADOW ROUTER (advice only; never places)
 #include <phynned/ipc/PhynnedAgentPublisher.hpp>
 
 #include <phyriad/topology/HardwareTopology.hpp>
@@ -33,8 +39,11 @@
 #include <phyriad/hal/Timestamp.hpp>
 #include <phyriad/hal/WakeEvent.hpp>       // FR-16 — cross-platform wake event
 #include <phyriad/process/CurrentProcess.hpp> // FR-18 — self_pid / self_name
+#include <phyriad/process/ProcessEnumerator.hpp> // E5 hardened coexistence full-scan
 
+#include <algorithm>
 #include <array>
+#include <bitset>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -212,6 +221,169 @@ static void apply_memory_budget() noexcept {
     }
 }
 
+// ══ MR-2 BACKGROUND CORRAL (DRY-RUN default) ══════════════════════════════
+// The corral moves ACTIVE, non-game background off the V-Cache CCD onto the
+// Frequency CCD (mask 0xFFFF0000 on the 7950X3D), keeping the 96 MB V-Cache
+// clean for games / measured cache-winners. It defaults to DRY-RUN: it computes
+// what it WOULD place and surfaces it, but calls ZERO Set* on any real process
+// unless the explicit LIVE switch is on (kPhynnedCmdSetCorralLive / --corral-live).
+
+/// Rule-id stamped on corral placements in the audit log (M4a). Distinct from the
+/// policy-engine rule ids (1..8), the differential pin (7), and the memory
+/// sentinel (99) so a corral row is unambiguous in audit.bin.
+static constexpr uint32_t kCorralRuleId = 20u;
+
+/// Rule-id stamped on W3 user "Always" pins in the audit log. Distinct from the
+/// policy-engine rule ids (1..8), the differential pin (7), the memory sentinel
+/// (99) and the corral (20) so a user-pin row is unambiguous, and so the R3
+/// selective revert can target user pins independently of corral placements.
+static constexpr uint32_t kUserRuleId = 21u;
+
+/// The EFFECTIVE profile for placement logic: Full is reserved for MR-3 (the A/B
+/// engine) and, until it lands, behaves as GamesCorral (W4 fallback).
+static config::Profile effective_profile(config::Profile p) noexcept {
+    return (p == config::Profile::Full) ? config::Profile::GamesCorral : p;
+}
+
+/// Active-CPU floor for a corral candidate. Matches the shadow router's herd
+/// floor (learn::RouteAdvisor::kActiveCpuPct = 3%): below it the process is idle
+/// herd and left alone (M3 "lo más barato"; do-no-harm).
+static constexpr float kCorralActiveCpuPct = 3.0f;
+
+// ── Fix B: the CORRAL action-layer denylist (E6, allowlist-primary) ────────
+// EXPLICIT exclusion set for the corral, SEPARATE from detection's touchable
+// filter (ProcessObserver::is_touchable / kSystemNames): even if one of these is
+// somehow observed, the corral never re-pins it. Second line of defence behind
+// the allowlist framing (kind != Game/System + not placement-eligible). Names are
+// matched case-insensitively (exact basename).
+static bool is_corral_denied(const char* exe_name) noexcept {
+    if (!exe_name || exe_name[0] == '\0') return true;  // no name → never touch
+    static constexpr const char* kCorralDeny[] = {
+        // Real-time audio (audiodg-class is the documented top folk-failure).
+        "audiodg.exe",
+        // Shell / text-input / console host.
+        "ctfmon.exe",   "conhost.exe",   "dwm.exe",
+        // Core OS / session processes.
+        "wininit.exe",  "csrss.exe",     "services.exe",
+        "smss.exe",     "winlogon.exe",  "lsass.exe",
+        "fontdrvhost.exe",
+        // VM worker / WSL memory host.
+        "vmmem.exe",    "vmmemwsl.exe",  "vmcompute.exe",
+        // AMD 3D V-Cache Optimizer service (E5 owner of the game-placement policy).
+        "amd3dvcachesvc.exe", "amd3dvcachedetection.exe",
+        // EDR / anti-cheat SERVICE processes (the protected GAME is handled
+        // separately by the AcDriverOracle zero-handle title map).
+        "easyanticheat.exe", "easyanticheatservice.exe", "easyanticheat_eos.exe",
+        "beservice.exe", "beserviceglobal.exe",
+        "vgc.exe",       "vgtray.exe",
+        "msmpeng.exe",   "securityhealthservice.exe",
+    };
+    for (const char* d : kCorralDeny) {
+#ifdef _WIN32
+        if (_stricmp(exe_name, d) == 0) return true;
+#else
+        if (std::strcmp(exe_name, d) == 0) return true;
+#endif
+    }
+    return false;
+}
+
+// ── E5 coexistence: a CONFLICTING CPU-affinity optimizer running? ──────────
+// E5 says detect the AMD 3D V-Cache service, Process Lasso, and Game Mode and
+// "defer/bound" to avoid flapping. Crucially those split into two classes:
+//
+//   COMPLEMENTARY (do NOT block) — the AMD 3D V-Cache Optimizer service. It
+//   routes GAMES between the CCDs; the corral EXCLUDES games (cedes them to it)
+//   and only touches non-game background, so their target sets are DISJOINT —
+//   no flapping. Blocking on it would be wrong: it runs permanently on every
+//   7950X3D box, which would make the live corral impossible forever. We defer
+//   to it exactly as E5 wants — by never touching a game — not by standing down.
+//   (Belt-and-suspenders: the per-process self-managed-mask exclusion in
+//   evaluate_corral() means any process another tool has pinned is skipped.)
+//
+//   CONFLICTING (force DRY-RUN) — broad affinity managers that pin ARBITRARY /
+//   background processes, which is exactly the corral's target set: Process
+//   Lasso (ProcessLasso.exe / ProcessGovernor.exe). Two of these fighting over
+//   the same background process is the documented flapping failure.
+//
+// Case-insensitive substring match on the exe basename.
+static bool is_coexistence_optimizer(const char* exe_name) noexcept {
+    if (!exe_name || exe_name[0] == '\0') return false;
+    static constexpr const char* kCoexist[] = {
+        "processlasso",     // Process Lasso UI
+        "processgovernor",  // Process Lasso background service
+        // NOTE: "amd3dvcache" deliberately NOT here — complementary, see above.
+    };
+    // Lower-case the basename once, then substring-search.
+    char lower[64]{};
+    uint32_t n = 0u;
+    for (; exe_name[n] != '\0' && n < sizeof(lower) - 1u; ++n) {
+        const char c = exe_name[n];
+        lower[n] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    }
+    lower[n] = '\0';
+    for (const char* needle : kCoexist) {
+        if (std::strstr(lower, needle) != nullptr) return true;
+    }
+    return false;
+}
+
+// ── The corral decision (PURE — cannot place) ──────────────────────────────
+// Mirrors the RouteAdvisor's structural safety: this returns a plain value with
+// NO reference to policy_engine / decision_buf / executor. A corral placement can
+// ONLY happen where run() feeds this decision to executor.apply, and that call is
+// gated behind the LIVE switch (see §3c). Decoupling the decision from the action
+// is what makes the DRY-RUN default provably no-op.
+struct CorralDecision {
+    bool        would_corral{false};  ///< all predicates hold → candidate
+    uint64_t    target_mask{0ull};    ///< Frequency-CCD mask to apply (0 if not)
+    const char* reason{""};           ///< M4a human-readable rule hit (static str)
+};
+
+/// Evaluate the corral predicate for one candidate. Corral IFF ALL hold:
+///   - kind != Game  AND  not placement-eligible   (games untouched — AMD's job)
+///   - kind != System  AND  not in the Fix-B corral denylist
+///   - the box is an X3D dual-CCD (vcache_mask != 0, freq_mask != 0; else E2 no-op)
+///   - RouteAdvisor advice != VCache                (do-no-harm: never pull a
+///     cache-candidate off V-Cache)
+///   - active: cpu_usage_pct >= kCorralActiveCpuPct
+///   - current affinity is readable (!= 0; else PPL/denied), touches a V-Cache
+///     core (else already off it → no-op), and is the FULL unrestricted system
+///     mask (else self-managed / already-restricted → respect it, E6).
+static CorralDecision evaluate_corral(
+    const observer::TargetProcess& tp,
+    const observer::TargetMetrics& tm,
+    bool                           is_placement_eligible,
+    uint32_t                       vcache_mask,
+    uint32_t                       system_mask,
+    uint64_t                       freq_mask) noexcept
+{
+    CorralDecision cd{};
+    // Games / the existing AC-gated placement path — never corralled.
+    if (tp.kind == observer::TargetKind::Game) return cd;
+    if (is_placement_eligible)                 return cd;
+    // System + the explicit Fix-B action-layer denylist.
+    if (tp.kind == observer::TargetKind::System) return cd;
+    if (is_corral_denied(tp.name))               return cd;
+    // Graceful degradation on non-X3D / homogeneous boxes (E2).
+    if (vcache_mask == 0u || freq_mask == 0ull) return cd;
+    // Do-no-harm: a cache-advised (VCache) candidate is never pulled off V-Cache.
+    if (tm.advice_ccd == static_cast<uint8_t>(learn::RouteAdvice::Ccd::VCache))
+        return cd;
+    // Active only — the idle herd is left alone (M3).
+    if (tm.cpu_usage_pct < kCorralActiveCpuPct) return cd;
+    // Current-placement gates (need current_core_mask from Fix A).
+    const uint32_t cur = tm.current_core_mask;
+    if (cur == 0u)                     return cd;  // PPL / open denied → don't touch
+    if ((cur & vcache_mask) == 0u)     return cd;  // already off V-Cache → no-op
+    if (cur != system_mask)            return cd;  // self-managed / restricted (E6)
+    // All predicates hold → would corral to the Frequency CCD.
+    cd.would_corral = true;
+    cd.target_mask  = freq_mask;
+    cd.reason = "corral: active bg on V-Cache CCD, not cache-advised -> Freq CCD";
+    return cd;
+}
+
 // ── Pimpl ─────────────────────────────────────────────────────────────────
 struct AgentRuntime::Impl {
     AgentConfig                     cfg;
@@ -235,6 +407,10 @@ struct AgentRuntime::Impl {
     observer::MetricsCollector      metrics;
     policy::PolicyEngine            policy_engine;
     action::ActionExecutor          executor;
+    // CR1 — zero-handle anti-cheat class oracle. Owned here; fed the foreground
+    // game's exe name by AcProbe before any placement on a game (see §6 apply
+    // loop). The permanent per-exe ALLOWED/BLOCKED label lives in `per_game`.
+    observer::AcDriverOracle        ac_oracle{};
     SelfMonitor                     self_monitor;
     PowerWatch                      power_watch;
     IdleWatch                       idle_watch;
@@ -258,6 +434,52 @@ struct AgentRuntime::Impl {
     config::AgentConfig             agent_cfg{};   // from policies.toml
     learn::PerGameMemory            per_game{};    // from memory.toml (~48 KB)
 
+    // ── MR-1 SHADOW ROUTER (advice only; structurally cannot place) ───────
+    // Caches the V-Cache core mask at construction. Consulted each tick AFTER
+    // metrics/classification; its RouteAdvice output is written onto metrics_buf
+    // (advice_ccd/advice_confidence) and logged — it NEVER feeds decision_buf,
+    // the policy engine, or the executor. See §3b in run().
+    learn::RouteAdvisor             route_advisor{};
+    // Advice-change rate-limit cache (M3): remember the last logged advice per
+    // pid so the [SHADOW] M4a log fires only on a CHANGE, not every tick. Bounded
+    // linear-probe table; overflow simply skips logging (never grows, never spams).
+    struct AdviceLogSlot { uint32_t pid{0u}; uint8_t last_ccd{0xFFu}; };
+    static constexpr uint32_t kAdviceLogSlots      = 128u;
+    static constexpr uint32_t kMaxAdviceLogPerTick = 16u;  // hard per-tick line cap
+    std::array<AdviceLogSlot, kAdviceLogSlots> advice_log_cache{};
+
+    // ── MR-2 BACKGROUND CORRAL (DRY-RUN default; structurally cannot place
+    //    while corral_live == false — the executor.apply call in §3c is gated
+    //    behind it). corral_live flips ONLY via the explicit UI/CLI switch. ──
+    bool     corral_live{false};              ///< the LIVE switch (default OFF)
+    bool     coexist_optimizer_present{false};///< E5: AMD V-Cache svc / Process Lasso
+    bool     coexist_full_scan_result{false}; ///< E5 hardened: last full-process scan verdict
+    uint32_t coexist_scan_counter{0u};        ///< ticks since last full coexistence scan
+    uint32_t self_pid{0u};                    ///< agent's own PID — never corral self
+    uint32_t vcache_core_mask{0u};            ///< V-Cache CCD cores (0x0000FFFF on X3D)
+    uint32_t system_core_mask{0u};            ///< all logical cores (0xFFFFFFFF on X3D)
+    uint64_t freq_corral_mask{0ull};          ///< Frequency CCD target (0xFFFF0000)
+    // Corral dry-run/live log rate-limit: log only on a would-corral CHANGE per
+    // pid (same bounded direct-mapped table pattern as advice_log_cache).
+    struct CorralLogSlot { uint32_t pid{0u}; uint8_t last_state{0xFFu}; };
+    static constexpr uint32_t kMaxCorralLogPerTick = 16u;
+    std::array<CorralLogSlot, kAdviceLogSlots> corral_log_cache{};
+
+    // ── W3 per-process user rules (persistent, from policies.toml) ─────────
+    // agent_cfg holds the rules (single writer). user_rules_generation bumps on
+    // every mutation (SetProcessRule / RemoveProcessRule) so a stale UI remove is
+    // rejected. user_rule_flags carries the dynamic per-rule status bits
+    // (blocked_by_ac / flap_warn) recomputed each tick by the user-pin pass;
+    // shm_user_rules is the off-stack scratch built for publish_user_rules.
+    uint32_t user_rules_generation{0u};
+    uint8_t  user_rule_flags[config::AgentConfig::kMaxProcessRules]{};
+    alignas(8) std::array<ipc::UserRuleShm,
+        config::AgentConfig::kMaxProcessRules> shm_user_rules{};
+    // Rate-limit the user-pin log to a state CHANGE per pid (same bounded
+    // direct-mapped table pattern as corral_log_cache).
+    struct UserPinLogSlot { uint32_t pid{0u}; uint8_t last_state{0xFFu}; };
+    std::array<UserPinLogSlot, kAdviceLogSlots> user_pin_log_cache{};
+
     // ── A/B benchmark runner ──────────────────────────────────────────────
     bench::ABRunner                 ab_runner{};   // controlled via IPC commands
 
@@ -278,6 +500,24 @@ struct AgentRuntime::Impl {
     uint32_t n_targets  {0u};
     uint32_t n_decisions{0u};
 
+    // ── MASS-router working buffers (Impl members → off the run() stack) ──
+    // Detection is now track-all-touchable, so target_buf can hold hundreds. Two
+    // consequences handled here:
+    //   1. PLACEMENT must stay exactly pre-MASS: only the pattern-ELIGIBLE subset
+    //      is fed to the policy engine, so observing the full herd can never make a
+    //      non-eligible process reach executor.apply (the mass-routing policy is a
+    //      separate later task). eligible_* holds that subset.
+    //   2. At the MASS cap these arrays would be multi-KB stack temporaries per
+    //      tick; they live in the (heap-allocated) Impl instead.
+    alignas(64) std::array<observer::TargetProcess, observer::kMaxTargets> eligible_targets{};
+    alignas(64) std::array<observer::TargetMetrics, observer::kMaxTargets> eligible_metrics{};
+    uint32_t n_eligible{0u};
+    alignas(64) std::array<observer::TargetProcess, observer::kMaxTargets> filtered_targets{};
+    alignas(64) std::array<observer::TargetMetrics, observer::kMaxTargets> filtered_metrics{};
+    // Bounded top-N view copied into the SHM — the UI contract stays kMaxShmTargets.
+    alignas(64) std::array<observer::TargetProcess, observer::kMaxShmTargets> shm_targets{};
+    alignas(64) std::array<observer::TargetMetrics, observer::kMaxShmTargets> shm_metrics{};
+
     // ── Wake event for early tick (FR-16) ────────────────────────────────
     // phyriad::hal::WakeEvent — cross-platform auto-reset event.
     // Initialised in start(); stop() and the watchdog callback signal it to
@@ -291,6 +531,9 @@ struct AgentRuntime::Impl {
 
     uint32_t self_monitor_counter{0u};
     static constexpr uint32_t kSelfMonitorInterval = 5u;
+    /// E5 hardened coexistence full-process scan cadence (ticks). The scan is a
+    /// full enumerate (~800µs @200 procs) so it runs periodically, not every tick.
+    static constexpr uint32_t kCoexistScanInterval = 8u;
 
     uint32_t idle_check_counter{0u};
     static constexpr uint32_t kIdleCheckInterval = 20u;
@@ -427,6 +670,27 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         // §5.3 Default policy pack: write hardware-appropriate policies.toml
         // on first run so users can inspect / edit what Phynned will do.
         (void)config::DefaultPolicyPack::write_if_missing(topo);
+
+        // ── MR-2 corral mask setup ────────────────────────────────────────
+        // vcache = the V-Cache CCD cores (0x0000FFFF on the 7950X3D, from the
+        // shadow router's cached hw::v_cache_cores()); system = all logical cores;
+        // freq = the complement (0xFFFF0000) = the corral target. On a non-X3D box
+        // vcache is 0 → freq is 0 → the corral degrades to a permanent no-op (E2).
+        {
+            const uint32_t n = topo.logical_core_count();
+            impl_->system_core_mask = (n == 0u || n >= 32u)
+                ? 0xFFFFFFFFu
+                : ((1u << n) - 1u);
+            impl_->vcache_core_mask = impl_->route_advisor.v_cache_mask();
+            impl_->freq_corral_mask =
+                static_cast<uint64_t>(impl_->system_core_mask
+                                      & ~impl_->vcache_core_mask);
+            std::fprintf(stdout,
+                "[Phynned][CORRAL] masks: vcache=0x%08X freq=0x%08llX system=0x%08X\n",
+                impl_->vcache_core_mask,
+                static_cast<unsigned long long>(impl_->freq_corral_mask),
+                impl_->system_core_mask);
+        }
     }
 
     // ── Observation patterns ─────────────────────────────────────────────
@@ -548,6 +812,22 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
             "or `phynned-cli resume`.\n");
     }
 
+    // ── MR-2 corral mode (safe-default DRY-RUN) ──────────────────────────
+    // W2: the corral LIVE switch now PERSISTS across restarts via [corral] enabled.
+    // corral_live = (file's [corral] enabled) OR the --corral-live self-test flag.
+    // With no config file both are false → DRY-RUN, byte-identical to today.
+    impl_->corral_live = impl_->agent_cfg.corral_enabled ||
+                         impl_->cfg.corral_live_default;
+    impl_->self_pid    = phyriad::proc::self_pid();  // never corral self (E6)
+    std::fprintf(stdout,
+        "[Phynned][CORRAL] background corral mode: %s (V-Cache CCD -> Freq CCD). "
+        "profile=%u keep_on_disable=%d rules=%u\n",
+        impl_->corral_live ? "LIVE (applies real affinity)"
+                           : "DRY-RUN (default; nothing applied)",
+        static_cast<unsigned>(impl_->agent_cfg.profile),
+        impl_->agent_cfg.corral_keep_on_disable ? 1 : 0,
+        impl_->agent_cfg.n_process_rules);
+
     // ── Manual TargetKind overrides (UI-editable file) ───────────────────
     // Load at startup; the agent main loop calls reload_if_changed() each
     // tick so users see their UI edits applied within ~100 ms without
@@ -628,6 +908,10 @@ std::expected<void, phyriad::Error> AgentRuntime::start() noexcept {
         // when launched with --start-active or by a service installer
         // that resumes us at boot).
         impl_->publisher.set_policies_paused(impl_->policies_paused ? 1u : 0u);
+        // W4: publish the loaded profile so the UI radio shows the right mode
+        // immediately (before the first tick's per-tick republish).
+        impl_->publisher.set_profile(
+            static_cast<uint8_t>(impl_->agent_cfg.profile));
     }
 
     // ── Internal watchdog ────────────────────────────────────────────────
@@ -734,6 +1018,206 @@ void AgentRuntime::run() noexcept {
                             }
                             break;
                         }
+                        case ipc::kPhynnedCmdSetCorralLive: {
+                            // MR-2/W2: flip the background-corral LIVE switch. arg1
+                            // = 0 → DRY-RUN, 1 → LIVE. arg2 = keep_placements_on_
+                            // disable (piggybacked). On a LIVE→DRY-RUN transition
+                            // with keep=false we selectively revert the corral
+                            // placements (R3); game pins + user pins are untouched.
+                            // The switch state persists via [corral] enabled (W2).
+                            const bool enable = (cmd_slot->arg1 != 0ull);
+                            const bool keep   = (cmd_slot->arg2 != 0ull);
+                            const bool was_live = impl_->corral_live;
+                            impl_->agent_cfg.corral_keep_on_disable = keep;
+                            uint32_t reverted = 0u;
+                            if (was_live && !enable && !keep) {
+                                reverted = impl_->executor.revert_by_rule_id(
+                                    kCorralRuleId);
+                            }
+                            impl_->corral_live               = enable;
+                            impl_->agent_cfg.corral_enabled  = enable;
+                            (void)config::ConfigStore::save_policies(
+                                impl_->agent_cfg);
+                            std::fprintf(stdout,
+                                "[Phynned][IPC] corral LIVE switch %s keep=%d "
+                                "reverted=%u (seq=%llu)%s\n",
+                                enable ? "ON" : "OFF", keep ? 1 : 0, reverted,
+                                static_cast<unsigned long long>(cur_seq),
+                                (enable && impl_->coexist_optimizer_present)
+                                    ? " — but a coexistence optimizer is present, "
+                                      "staying DRY-RUN (E5)"
+                                    : "");
+                            break;
+                        }
+                        case ipc::kPhynnedCmdSetProcessRule: {
+                            // W3: create/update a per-process user rule. Agent
+                            // resolves the exe name from its tracked state (or
+                            // QueryFullProcessImageNameW), stores an empty path
+                            // (name-only match; hand-edit the TOML to add a path).
+                            const uint32_t pid =
+                                cmd_slot->target_pid;
+                            const uint8_t action =
+                                static_cast<uint8_t>(cmd_slot->arg1 & 0xFFu);
+                            char name[64]{};
+                            bool resolved = false;
+                            for (uint32_t j = 0u; j < impl_->n_targets; ++j) {
+                                if (impl_->target_buf[j].pid == pid &&
+                                    impl_->target_buf[j].name[0] != '\0') {
+                                    std::snprintf(name, sizeof(name), "%s",
+                                                  impl_->target_buf[j].name);
+                                    resolved = true;
+                                    break;
+                                }
+                            }
+                            if (!resolved)
+                                resolved = get_process_short_name(
+                                    pid, name, sizeof(name));
+
+                            if (resolved && action <= 2u) {
+                                config::AgentConfig& ac = impl_->agent_cfg;
+                                bool updated = false;
+                                for (uint32_t j = 0u;
+                                     j < ac.n_process_rules; ++j) {
+#ifdef _WIN32
+                                    const bool same =
+                                        (_stricmp(ac.process_rules[j].name,
+                                                  name) == 0) &&
+                                        ac.process_rules[j].path[0] == '\0';
+#else
+                                    const bool same =
+                                        (std::strcmp(ac.process_rules[j].name,
+                                                     name) == 0) &&
+                                        ac.process_rules[j].path[0] == '\0';
+#endif
+                                    if (same) {
+                                        ac.process_rules[j].action = action;
+                                        updated = true;
+                                        break;
+                                    }
+                                }
+                                if (!updated &&
+                                    ac.n_process_rules <
+                                        config::AgentConfig::kMaxProcessRules) {
+                                    config::ProcessRule& r =
+                                        ac.process_rules[ac.n_process_rules++];
+                                    r = config::ProcessRule{};
+                                    std::snprintf(r.name, sizeof(r.name),
+                                                  "%s", name);
+                                    r.path[0] = '\0';
+                                    r.action  = action;
+                                }
+                                (void)config::ConfigStore::save_policies(ac);
+                                ++impl_->user_rules_generation;
+                                std::fprintf(stdout,
+                                    "[Phynned][IPC] user rule %s: %s -> action=%u "
+                                    "(seq=%llu)\n",
+                                    updated ? "updated" : "added", name,
+                                    static_cast<unsigned>(action),
+                                    static_cast<unsigned long long>(cur_seq));
+                            } else {
+                                std::fprintf(stdout,
+                                    "[Phynned][IPC] SetProcessRule ignored "
+                                    "(pid=%u unresolved or bad action) seq=%llu\n",
+                                    pid,
+                                    static_cast<unsigned long long>(cur_seq));
+                            }
+                            break;
+                        }
+                        case ipc::kPhynnedCmdRemoveProcessRule: {
+                            // W3: remove a user rule by SHM slot index. arg2 =
+                            // rules-block generation; a stale generation means the
+                            // table changed under the UI, so ignore the request.
+                            const uint32_t slot =
+                                static_cast<uint32_t>(cmd_slot->arg1);
+                            const uint32_t gen =
+                                static_cast<uint32_t>(cmd_slot->arg2);
+                            config::AgentConfig& ac = impl_->agent_cfg;
+                            if (gen == impl_->user_rules_generation &&
+                                slot < ac.n_process_rules) {
+                                // Capture the name BEFORE compaction: removing an
+                                // Always rule also undoes the pins it caused (the
+                                // operator's off-means-undo semantics), scoped by
+                                // exe so pins from OTHER user rules survive. If a
+                                // second same-name rule remains, the next tick
+                                // simply re-applies per that rule (self-correcting).
+                                char removed_name[64];
+                                std::memcpy(removed_name,
+                                            ac.process_rules[slot].name,
+                                            sizeof(removed_name));
+                                for (uint32_t j = slot;
+                                     j + 1u < ac.n_process_rules; ++j) {
+                                    ac.process_rules[j] =
+                                        ac.process_rules[j + 1u];
+                                }
+                                --ac.n_process_rules;
+                                ac.process_rules[ac.n_process_rules] =
+                                    config::ProcessRule{};
+                                (void)config::ConfigStore::save_policies(ac);
+                                ++impl_->user_rules_generation;
+                                const uint32_t nrev =
+                                    impl_->executor.revert_by_rule_id(
+                                        kUserRuleId, removed_name);
+                                std::fprintf(stdout,
+                                    "[Phynned][IPC] user rule removed slot=%u "
+                                    "exe=%s (%u pin%s reverted) (seq=%llu)\n",
+                                    slot, removed_name, nrev,
+                                    nrev == 1u ? "" : "s",
+                                    static_cast<unsigned long long>(cur_seq));
+                            } else {
+                                std::fprintf(stdout,
+                                    "[Phynned][IPC] RemoveProcessRule ignored "
+                                    "(stale gen=%u vs %u or slot=%u oob) seq=%llu\n",
+                                    gen, impl_->user_rules_generation, slot,
+                                    static_cast<unsigned long long>(cur_seq));
+                            }
+                            break;
+                        }
+                        case ipc::kPhynnedCmdSetProfile: {
+                            // W4: set the global profile. Leaving the corral-active
+                            // profile reverts corral placements (R3); switching to
+                            // Monitor also reverts user pins (nothing stays placed).
+                            const uint8_t pv =
+                                static_cast<uint8_t>(cmd_slot->arg1 & 0xFFu);
+                            if (pv <= 3u) {
+                                const config::Profile old_p =
+                                    impl_->agent_cfg.profile;
+                                const config::Profile new_p =
+                                    static_cast<config::Profile>(pv);
+                                const config::Profile old_eff =
+                                    effective_profile(old_p);
+                                const config::Profile new_eff =
+                                    effective_profile(new_p);
+                                impl_->agent_cfg.profile = new_p;
+
+                                uint32_t rev_c = 0u, rev_u = 0u;
+                                if (new_eff == config::Profile::Monitor) {
+                                    rev_c = impl_->executor.revert_by_rule_id(
+                                        kCorralRuleId);
+                                    rev_u = impl_->executor.revert_by_rule_id(
+                                        kUserRuleId);
+                                } else if (old_eff ==
+                                               config::Profile::GamesCorral &&
+                                           new_eff !=
+                                               config::Profile::GamesCorral) {
+                                    rev_c = impl_->executor.revert_by_rule_id(
+                                        kCorralRuleId);
+                                }
+                                (void)config::ConfigStore::save_policies(
+                                    impl_->agent_cfg);
+                                impl_->publisher.set_profile(pv);
+                                std::fprintf(stdout,
+                                    "[Phynned][IPC] profile %u->%u "
+                                    "(corral_reverted=%u user_reverted=%u)%s "
+                                    "(seq=%llu)\n",
+                                    static_cast<unsigned>(old_p),
+                                    static_cast<unsigned>(new_p), rev_c, rev_u,
+                                    (new_p == config::Profile::Full)
+                                        ? " [Full reserved (MR-3) -> games_corral "
+                                          "behaviour]" : "",
+                                    static_cast<unsigned long long>(cur_seq));
+                            }
+                            break;
+                        }
                         default:
                             // Unknown — ignore but still ack so client doesn't retry.
                             break;
@@ -743,6 +1227,16 @@ void AgentRuntime::run() noexcept {
                 }
             }
         }
+
+        // ── W4 placement master-gate (R6) ─────────────────────────────────
+        // Computed AFTER IPC processing so a SetProfile command this tick takes
+        // effect immediately. Monitor = observe/advise only: NO placement at any
+        // of the three feed points (§3c-user user pins, §3c corral, §6 auto
+        // apply). Observation / shadow / telemetry are NEVER gated by this.
+        const config::Profile eff_profile =
+            effective_profile(impl_->agent_cfg.profile);
+        const bool placement_allowed =
+            (eff_profile != config::Profile::Monitor);
 
         // ── Power check (every kPowerCheckInterval ticks) ─────────────────
         PHYNNED_PHASE(diag::PhasePowerCheck);
@@ -982,6 +1476,319 @@ void AgentRuntime::run() noexcept {
             }
         }
 
+        // ── 3b. SHADOW ROUTER (MR-1) — advisory CCD recommendation ─────────
+        // Read-only DECISION layer. For each observed process it writes a CCD
+        // recommendation onto metrics_buf[i] (advice_ccd/advice_confidence) and
+        // logs MOVE advice (M4a). It STRUCTURALLY CANNOT PLACE: RouteAdvisor::
+        // advise() returns a pure value (RouteAdvice) with no reference to
+        // policy_engine, decision_buf, or executor — the advice never enters the
+        // §5 policy path, which still consumes ONLY the eligible subset. Runs over
+        // the full tracked herd because its purpose is "this observed process WOULD
+        // route to X"; games/eligible/system/idle are marked LeaveAlone inside
+        // advise() and never produce a MOVE line.
+        PHYNNED_PHASE(diag::PhaseClassify);
+        {
+            uint32_t n_logged = 0u;
+            for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+                const observer::TargetProcess& tp = impl_->target_buf[i];
+                observer::TargetMetrics&       tm = impl_->metrics_buf[i];
+
+                const bool game_managed =
+                    impl_->observer.is_placement_eligible(tp.name);
+                const learn::RouteAdvice adv =
+                    impl_->route_advisor.advise(tm, tp.kind, game_managed);
+
+                // Ride the existing SHM publish: these two bytes live inside
+                // TargetMetrics and are copied into shm_metrics[] in §7 — no new
+                // SHM field, no protocol size change.
+                tm.advice_ccd        = static_cast<uint8_t>(adv.ccd);
+                tm.advice_confidence = adv.confidence;
+
+                // ── M4a: log MOVE advice, rate-limited on advice-change per pid ──
+                const bool is_move =
+                    (adv.ccd != learn::RouteAdvice::Ccd::LeaveAlone) &&
+                    !adv.already_there;
+                if (!is_move) continue;
+                if (n_logged >= Impl::kMaxAdviceLogPerTick) continue;
+
+                // Direct-mapped rate-limit cache (pid % slots): log only when this
+                // pid's advice CHANGES. Collisions self-evict (overwrite) and at
+                // worst cause an occasional duplicate line — bounded by the per-tick
+                // cap above, so M3 is respected.
+                const uint8_t ccd_u = static_cast<uint8_t>(adv.ccd);
+                Impl::AdviceLogSlot& slot =
+                    impl_->advice_log_cache[tp.pid % Impl::kAdviceLogSlots];
+                const bool changed =
+                    (slot.pid != tp.pid) || (slot.last_ccd != ccd_u);
+                if (!changed) continue;
+                slot.pid      = tp.pid;
+                slot.last_ccd = ccd_u;
+
+                const char* ccd_name =
+                    (adv.ccd == learn::RouteAdvice::Ccd::VCache) ? "VCache" : "Freq";
+                std::fprintf(stdout,
+                    "[Phynned][SHADOW] pid=%u exe=%s advise=%s ws=%uMB "
+                    "cpu=%.1f%% conf=%u (%s)\n",
+                    tp.pid, tp.name[0] ? tp.name : "<unknown>",
+                    ccd_name, tm.working_set_mb, tm.cpu_usage_pct,
+                    adv.confidence, adv.reason);
+                ++n_logged;
+            }
+        }
+
+        // ── 3c-user. USER "ALWAYS" PINS (W3) — precedence #3, above auto ───
+        // Runs BEFORE the corral so a user pin WINS over it (the corral then skips
+        // any user-ruled process). Gated by the placement master-gate (Monitor →
+        // no user placement, R6) and the pause gate. Per-rule status flags
+        // (blocked_by_ac / flap_warn) are recomputed each tick for the UI badges.
+        PHYNNED_PHASE(diag::PhaseClassify);
+        {
+            const uint32_t n_rules = impl_->agent_cfg.n_process_rules;
+            // Clear the dynamic flags each tick (has_path is added at publish).
+            for (uint32_t r = 0u; r < n_rules; ++r)
+                impl_->user_rule_flags[r] = 0u;
+
+            if (placement_allowed && !impl_->policies_paused && n_rules > 0u) {
+                uint32_t n_logged = 0u;
+                for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+                    const observer::TargetProcess& tp = impl_->target_buf[i];
+                    observer::TargetMetrics&       tm = impl_->metrics_buf[i];
+                    if (tp.pid == impl_->self_pid) continue;  // never pin self (E6)
+
+                    const config::ProcessRule* rule =
+                        find_user_rule_for(impl_->agent_cfg, tp.name, tp.pid);
+                    if (rule == nullptr) continue;
+                    const uint32_t idx = static_cast<uint32_t>(
+                        rule - impl_->agent_cfg.process_rules);
+                    // Never (veto) is enforced by EXCLUSION in the corral + §6 auto
+                    // passes; there is nothing to place here.
+                    if (rule->action ==
+                        static_cast<uint8_t>(config::RuleAction::Never))
+                        continue;
+
+                    const uint64_t our_mask =
+                        impl_->executor.active_applied_mask(tp.pid);
+                    const UserPinDecision upd = evaluate_user_pin(
+                        rule->action, tp.kind, tm, our_mask,
+                        impl_->vcache_core_mask, impl_->system_core_mask,
+                        impl_->freq_corral_mask);
+
+                    Impl::UserPinLogSlot& slot =
+                        impl_->user_pin_log_cache[tp.pid % Impl::kAdviceLogSlots];
+
+                    if (upd.already_placed) continue;
+
+                    if (!upd.would_pin) {
+                        // R4 flap guard: another manager owns this affinity.
+                        if (upd.flap_warn) {
+                            if (idx < n_rules)
+                                impl_->user_rule_flags[idx] |=
+                                    ipc::kUserRuleFlagFlapWarn;
+                            const uint8_t st = 3u;  // flap
+                            if ((slot.pid != tp.pid || slot.last_state != st) &&
+                                n_logged < Impl::kMaxCorralLogPerTick) {
+                                slot.pid = tp.pid; slot.last_state = st;
+                                std::fprintf(stdout,
+                                    "[Phynned][W3] user-pin SKIP pid=%u exe=%s "
+                                    "cur=0x%08X — pinned by another manager "
+                                    "(flap guard, never fight)\n",
+                                    tp.pid, tp.name[0] ? tp.name : "<unknown>",
+                                    tm.current_core_mask);
+                                ++n_logged;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ── R1: Game / unknown-class → SAME §6 AC probe/oracle gate.
+                    // A Refused/Blocked verdict SKIPS the apply entirely: the
+                    // game's process is never opened for a Set*. NEVER bypassed.
+                    if (upd.needs_ac_gate) {
+                        const action::ProbeResult pr =
+                            action::AcProbe::probe_and_label(
+                                tp.pid, tp.name, impl_->ac_oracle,
+                                impl_->per_game,
+                                impl_->audit_log.is_open()
+                                    ? &impl_->audit_log : nullptr);
+                        if (pr == action::ProbeResult::Refused_DoNotProbe ||
+                            pr == action::ProbeResult::Blocked ||
+                            pr == action::ProbeResult::AlreadyLabeledBlocked) {
+                            if (idx < n_rules)
+                                impl_->user_rule_flags[idx] |=
+                                    ipc::kUserRuleFlagBlockedAc;
+                            const uint8_t st = 4u;  // blocked
+                            if ((slot.pid != tp.pid || slot.last_state != st) &&
+                                n_logged < Impl::kMaxCorralLogPerTick) {
+                                slot.pid = tp.pid; slot.last_state = st;
+                                std::fprintf(stdout,
+                                    "[Phynned][W3][R1] user-pin AC-gate SKIP "
+                                    "pid=%u exe=%s verdict=%s (no placement)\n",
+                                    tp.pid, tp.name,
+                                    action::to_string(pr));
+                                ++n_logged;
+                            }
+                            continue;   // never reaches executor.apply
+                        }
+                    }
+
+                    // ── Apply via the EXISTING executor path (journal + revert).
+                    policy::PolicyDecision d{};
+                    d.core_mask      = upd.target_mask;
+                    d.decided_tsc    = now_tsc;
+                    d.target_pid     = tp.pid;
+                    d.rule_id        = kUserRuleId;
+                    d.priority_class = 0u;
+                    d.action_kind    = policy::ActionKind::PinAffinity;
+                    d.confidence     = 100u;
+                    const auto ar = impl_->executor.apply(d, tp.name,
+                                                          /*creation_time=*/0ull);
+                    const uint8_t st = ar ? 2u : 1u;
+                    if ((slot.pid != tp.pid || slot.last_state != st) &&
+                        n_logged < Impl::kMaxCorralLogPerTick) {
+                        slot.pid = tp.pid; slot.last_state = st;
+                        std::fprintf(stdout,
+                            "[Phynned][W3] user-pin pid=%u exe=%s ->0x%08llX %s "
+                            "(%s)\n",
+                            tp.pid, tp.name[0] ? tp.name : "<unknown>",
+                            static_cast<unsigned long long>(upd.target_mask),
+                            ar ? "applied" : "apply-failed", upd.reason);
+                        ++n_logged;
+                    }
+                }
+            }
+        }
+
+        // ── 3c. BACKGROUND CORRAL (MR-2) — DRY-RUN default ─────────────────
+        // Moves ACTIVE non-game background off the V-Cache CCD onto the Freq CCD,
+        // keeping the 96 MB V-Cache clean for games / measured cache-winners.
+        //
+        // SCOPE BOUNDARY: default DRY-RUN. It computes the CorralDecision, surfaces
+        // it (a [CORRAL-DRYRUN] log line + the per-target advice_ccd=WouldCorral UI
+        // marker) and applies NOTHING. The ONLY path to executor.apply is the
+        // `corral_apply` branch below, gated behind the LIVE switch AND the E5
+        // coexistence guard. evaluate_corral() is a pure value function with no
+        // reference to the executor, so a dry-run decision is STRUCTURALLY unable to
+        // place — exactly the RouteAdvisor guarantee, extended to the action layer.
+        PHYNNED_PHASE(diag::PhaseClassify);
+        {
+            // E5 coexistence — HARDENED. A periodic FULL-process scan (every
+            // kCoexistScanInterval ticks) catches an affinity optimizer that is
+            // FILTERED OUT of the tracked/touchable set (e.g. the AMD 3D V-Cache
+            // service, commonly denylisted from tracking) — the previous
+            // tracked-only scan would miss it, letting the corral flap against it.
+            // Runs on the first tick (counter starts 0) so the guard is armed
+            // before the switch could ever be flipped.
+            if (impl_->coexist_scan_counter == 0u) {
+                static thread_local phyriad::proc::ProcessEntry
+                    s_coexist[phyriad::proc::kMaxProcesses];
+                const uint32_t nn = phyriad::proc::enumerate_processes(
+                    s_coexist, phyriad::proc::kMaxProcesses);
+                bool full = false;
+                for (uint32_t i = 0u; i < nn; ++i) {
+                    if (is_coexistence_optimizer(s_coexist[i].name)) { full = true; break; }
+                }
+                impl_->coexist_full_scan_result = full;
+            }
+            if (++impl_->coexist_scan_counter >= Impl::kCoexistScanInterval)
+                impl_->coexist_scan_counter = 0u;
+
+            // Full-scan verdict (may be up to kCoexistScanInterval ticks stale) OR
+            // the per-tick tracked scan (immediate for a tracked optimizer).
+            bool coexist = impl_->coexist_full_scan_result;
+            for (uint32_t i = 0u; !coexist && i < impl_->n_targets; ++i) {
+                if (is_coexistence_optimizer(impl_->target_buf[i].name))
+                    coexist = true;
+            }
+            impl_->coexist_optimizer_present = coexist;
+
+            // The ONLY gate that can route a corral decision into executor.apply.
+            // corral_live starts false (safe default); coexistence forces false;
+            // the corral runs ONLY in the GamesCorral profile and never in Monitor
+            // (R6). placement_allowed is redundant with the GamesCorral check but
+            // kept explicit to mirror the master-gate at every feed point.
+            const bool corral_apply =
+                impl_->corral_live && !coexist && placement_allowed &&
+                eff_profile == config::Profile::GamesCorral;
+
+            uint32_t n_logged = 0u;
+            for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+                const observer::TargetProcess& tp = impl_->target_buf[i];
+                observer::TargetMetrics&       tm = impl_->metrics_buf[i];
+
+                // Never corral the agent itself (E6 self-exclusion): apply_self_pin
+                // pins only the agent's main THREAD to a non-V-Cache core, so its
+                // PROCESS mask stays full and would otherwise match the predicate.
+                if (tp.pid == impl_->self_pid) continue;
+
+                // W3 precedence: any user rule (Never veto OR Always pin) wins over
+                // the corral. Always is placed by the §3c-user pass; Never means
+                // do-not-touch. Either way the corral does not touch this process.
+                if (find_user_rule_for(impl_->agent_cfg, tp.name, tp.pid)
+                        != nullptr)
+                    continue;
+
+                const bool eligible =
+                    impl_->observer.is_placement_eligible(tp.name);
+                const CorralDecision cd = evaluate_corral(
+                    tp, tm, eligible,
+                    impl_->vcache_core_mask, impl_->system_core_mask,
+                    impl_->freq_corral_mask);
+                if (!cd.would_corral) continue;
+
+                // Per-target UI marker — rides the existing advice_ccd byte into
+                // the SHM (no layout change): "the corral WOULD move this to Freq".
+                tm.advice_ccd = observer::kAdviceCcdWouldCorral;
+
+                // Rate-limit the log to a would-corral state CHANGE per pid (same
+                // bounded direct-mapped table pattern as the shadow router).
+                Impl::CorralLogSlot& slot =
+                    impl_->corral_log_cache[tp.pid % Impl::kAdviceLogSlots];
+                const uint8_t state_now = corral_apply ? 2u : 1u; // 1=dry,2=live
+                const bool changed =
+                    (slot.pid != tp.pid) || (slot.last_state != state_now);
+
+                if (!corral_apply) {
+                    // ── DRY-RUN: surface only. ZERO Set*; executor NEVER reached ──
+                    if (changed && n_logged < Impl::kMaxCorralLogPerTick) {
+                        slot.pid = tp.pid; slot.last_state = state_now;
+                        std::fprintf(stdout,
+                            "[Phynned][CORRAL-DRYRUN] pid=%u exe=%s would->Freq"
+                            "(0x%08llX) cpu=%.1f%% cur=0x%08X ws=%uMB (%s)\n",
+                            tp.pid, tp.name[0] ? tp.name : "<unknown>",
+                            static_cast<unsigned long long>(cd.target_mask),
+                            tm.cpu_usage_pct, tm.current_core_mask,
+                            tm.working_set_mb, cd.reason);
+                        ++n_logged;
+                    }
+                    continue;  // ← the structural no-op: dry-run stops here
+                }
+
+                // ── LIVE: reuse the EXISTING executor.apply (journal + revert;
+                // the §6 AC-gate is moot here — corral candidates are non-Game by
+                // predicate). No second Set* path. ────────────────────────────
+                policy::PolicyDecision d{};
+                d.core_mask      = cd.target_mask;
+                d.decided_tsc    = now_tsc;
+                d.target_pid     = tp.pid;
+                d.rule_id        = kCorralRuleId;
+                d.priority_class = 0u;
+                d.action_kind    = policy::ActionKind::PinAffinity;
+                d.confidence     = 100u;
+                const auto ar =
+                    impl_->executor.apply(d, tp.name, /*creation_time=*/0ull);
+                if (changed && n_logged < Impl::kMaxCorralLogPerTick) {
+                    slot.pid = tp.pid; slot.last_state = state_now;
+                    std::fprintf(stdout,
+                        "[Phynned][CORRAL-LIVE] pid=%u exe=%s ->Freq(0x%08llX) "
+                        "%s (%s)\n",
+                        tp.pid, tp.name[0] ? tp.name : "<unknown>",
+                        static_cast<unsigned long long>(cd.target_mask),
+                        ar ? "applied" : "apply-failed", cd.reason);
+                    ++n_logged;
+                }
+            }
+        }
+
         // ── 4. Classify workload state ────────────────────────────────────
         PHYNNED_PHASE(diag::PhaseWorkloadState);
         if (impl_->n_targets == 0u) {
@@ -1005,18 +1812,39 @@ void AgentRuntime::run() noexcept {
 
         // ── 5. Evaluate policies ──────────────────────────────────────────
         PHYNNED_PHASE(diag::PhasePolicyEvaluate);
-        if (impl_->n_targets > 0u) {
+        // ── MASS-router PLACEMENT BOUNDARY (2026-07-17) ───────────────────
+        // Detection now tracks ALL touchable processes, but PLACEMENT must stay
+        // exactly as before: only pattern-ELIGIBLE processes may be policy-
+        // evaluated. Build that subset here and feed it (NOT the full target_buf)
+        // to every policy path. This is what guarantees a newly-observed mass
+        // process (Unknown/Productivity herd) NEVER reaches executor.apply —
+        // including via Rule 8 (CCD Load Defense), which selects non-Game targets
+        // by CPU% and would otherwise evict arbitrary background processes off the
+        // V-Cache CCD. The real mass-routing policy is a separate later task.
+        impl_->n_eligible = 0u;
+        for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+            if (impl_->observer.is_placement_eligible(impl_->target_buf[i].name)) {
+                impl_->eligible_targets[impl_->n_eligible] = impl_->target_buf[i];
+                impl_->eligible_metrics[impl_->n_eligible] = impl_->metrics_buf[i];
+                ++impl_->n_eligible;
+            }
+        }
+        if (impl_->n_eligible > 0u) {
             // ── 5a. AutoPolicySelector: per-game memory shortcut (§9.2/9.3) ─
             // For targets with a fresh PerGameMemory entry, inject decisions
             // directly from the cache, bypassing PolicyEngine for those targets.
-            uint32_t memory_hit_mask = 0u;    // bit i = target[i] had memory hit
+            // bit i = target[i] had a per-game-memory hit. std::bitset (not a
+            // uint32_t) because n_targets ranges to kMaxTargets(64): the old
+            // `1u << i` was undefined behaviour for i>=32 (a pre-existing bug,
+            // fixed 2026-07-17 BR1). bitset<64> is stack-only, no heap.
+            std::bitset<observer::kMaxTargets> memory_hit_mask;
             impl_->n_decisions = 0u;
 
             if (impl_->auto_selector.is_ready()) {
-                for (uint32_t i = 0u; i < impl_->n_targets &&
+                for (uint32_t i = 0u; i < impl_->n_eligible &&
                         impl_->n_decisions < policy::kMaxDecisionsPerCycle; ++i)
                 {
-                    const observer::TargetProcess& tp = impl_->target_buf[i];
+                    const observer::TargetProcess& tp = impl_->eligible_targets[i];
                     if (impl_->per_game.is_bad(tp.name)) continue;
 
                     const policy::AutoDecision ad = impl_->auto_selector.select(
@@ -1024,7 +1852,7 @@ void AgentRuntime::run() noexcept {
 
                     if (ad.from_memory && ad.core_mask != 0ull) {
                         // Memory hit: synthesize decision with high confidence.
-                        memory_hit_mask |= (1u << i);
+                        memory_hit_mask.set(i);
                         auto& d          = impl_->decision_buf[impl_->n_decisions++];
                         d.target_pid     = tp.pid;
                         d.rule_id        = 99u; // sentinel: memory-sourced
@@ -1041,30 +1869,33 @@ void AgentRuntime::run() noexcept {
 
             // ── 5b. PolicyEngine: rule-based evaluation for remaining targets
             // Targets that got a memory hit are filtered out to avoid duplicates.
-            if (memory_hit_mask == 0u) {
-                // Common case: no memory hits — evaluate all targets normally.
+            // NOTE: evaluated over the pattern-ELIGIBLE subset only (n_eligible),
+            // never the full touchable set — the MASS placement boundary.
+            if (memory_hit_mask.none()) {
+                // Common case: no memory hits — evaluate all eligible targets.
                 impl_->n_decisions = impl_->policy_engine.evaluate(
-                    impl_->target_buf.data(),  impl_->n_targets,
-                    impl_->metrics_buf.data(), impl_->n_targets,
+                    impl_->eligible_targets.data(),  impl_->n_eligible,
+                    impl_->eligible_metrics.data(), impl_->n_eligible,
                     impl_->decision_buf.data());
             } else {
                 // Partial case: filter out memory-hit targets, evaluate the rest.
-                observer::TargetProcess  filtered_targets[observer::kMaxTargets]{};
-                observer::TargetMetrics  filtered_metrics[observer::kMaxTargets]{};
+                // filtered_* are Impl members (off-stack at the MASS cap).
+                auto& filtered_targets = impl_->filtered_targets;
+                auto& filtered_metrics = impl_->filtered_metrics;
                 uint32_t n_filtered = 0u;
 
-                for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
-                    if (memory_hit_mask & (1u << i)) continue; // already handled
-                    filtered_targets[n_filtered] = impl_->target_buf[i];
-                    filtered_metrics[n_filtered] = impl_->metrics_buf[i];
+                for (uint32_t i = 0u; i < impl_->n_eligible; ++i) {
+                    if (memory_hit_mask.test(i)) continue; // already handled
+                    filtered_targets[n_filtered] = impl_->eligible_targets[i];
+                    filtered_metrics[n_filtered] = impl_->eligible_metrics[i];
                     ++n_filtered;
                 }
 
                 if (n_filtered > 0u) {
                     policy::PolicyDecision extra_buf[policy::kMaxDecisionsPerCycle]{};
                     const uint32_t n_extra = impl_->policy_engine.evaluate(
-                        filtered_targets, n_filtered,
-                        filtered_metrics,  n_filtered,
+                        filtered_targets.data(), n_filtered,
+                        filtered_metrics.data(),  n_filtered,
                         extra_buf);
 
                     for (uint32_t k = 0u; k < n_extra &&
@@ -1082,7 +1913,9 @@ void AgentRuntime::run() noexcept {
             // applied), but executor.apply() is skipped. Existing actions
             // were reverted at pause time.
             for (uint32_t i = 0u; i < impl_->n_decisions; ++i) {
-                if (impl_->policies_paused) break;
+                // R6: Monitor profile never applies (evaluation still populated
+                // decision_buf above, so the UI still sees what WOULD apply).
+                if (impl_->policies_paused || !placement_allowed) break;
                 const policy::PolicyDecision& d = impl_->decision_buf[i];
 
                 // Diag: record which decision we're about to apply.
@@ -1098,6 +1931,54 @@ void AgentRuntime::run() noexcept {
                     }
                 }
                 if (skip) continue;
+
+                // ── Look up this decision's target descriptor ────────────────
+                // Needed by the CR1 AC-gate (exe name + kind) and the DR1 journal
+                // plumbing (exe name). Decisions derive from target_buf, so a
+                // match is expected; tp==nullptr degrades safely (no gate; apply
+                // self-queries the exe).
+                const observer::TargetProcess* tp = nullptr;
+                for (uint32_t j = 0u; j < impl_->n_targets; ++j) {
+                    if (impl_->target_buf[j].pid == d.target_pid) {
+                        tp = &impl_->target_buf[j];
+                        break;
+                    }
+                }
+
+                // ── W3 precedence: a user rule overrides auto placement ──────
+                // Never = veto; Always = already handled by the §3c-user pass.
+                // Either way the automatic path (game rule / memory / A/B) must
+                // not act on a user-ruled process (precedence: user > auto).
+                if (tp != nullptr &&
+                    find_user_rule_for(impl_->agent_cfg, tp->name, tp->pid)
+                        != nullptr) {
+                    continue;
+                }
+
+                // ── CR1: anti-cheat gate — BEFORE any OpenProcess / set ──────
+                // Runs before executor.apply AND apply_differential_pin for any
+                // GAME target. AcProbe opens ZERO handles on a do-not-probe title
+                // (SilentPunish_C / UnknownAc) and short-circuits with no handle
+                // on a prior per-exe label; steady-state cost ≈ 0 (one probe per
+                // exe-identity, EVER). A Refused/Blocked verdict SKIPS the apply
+                // entirely — the game's process is never opened (M4a: logged).
+                if (tp != nullptr && tp->kind == observer::TargetKind::Game) {
+                    const action::ProbeResult pr = action::AcProbe::probe_and_label(
+                        d.target_pid,
+                        tp->name,
+                        impl_->ac_oracle,
+                        impl_->per_game,
+                        impl_->audit_log.is_open() ? &impl_->audit_log : nullptr);
+                    if (pr == action::ProbeResult::Refused_DoNotProbe ||
+                        pr == action::ProbeResult::Blocked            ||
+                        pr == action::ProbeResult::AlreadyLabeledBlocked) {
+                        std::fprintf(stdout,
+                            "[Phynned][CR1] AC-gate SKIP: pid=%u exe=%s verdict=%s "
+                            "(no placement applied)\n",
+                            d.target_pid, tp->name, action::to_string(pr));
+                        continue;   // never reaches any executor.apply* for this PID
+                    }
+                }
 
                 // Rule 7 (PinHotThreadDifferential)
                 // requires a side channel to ActionExecutor because the
@@ -1130,7 +2011,12 @@ void AgentRuntime::run() noexcept {
                         continue;
                     }
                 } else {
-                    apply_result = impl_->executor.apply(d);
+                    // DR1: plumb the exe basename into the write-ahead journal.
+                    // TargetProcess carries no process creation-time, so pass 0
+                    // and let ActionExecutor self-query it (via GetProcessTimes)
+                    // for the pid-recycle-safe journal key.
+                    apply_result = impl_->executor.apply(
+                        d, (tp != nullptr) ? tp->name : nullptr, /*creation_time=*/0ull);
                 }
 
                 if (apply_result) {
@@ -1158,20 +2044,62 @@ void AgentRuntime::run() noexcept {
                 &impl_->audit_cursor);
         }
 
+        // ── 6c. Fix A: reconcile allowed_core_mask from live executor state ──
+        // MetricsCollector::sample() zeroes allowed_core_mask every tick, so we
+        // stamp it here from the executor's active table: a PID with an active
+        // placement gets the applied mask (UI "routed"/green affinity); a PID
+        // whose action was reverted/pruned gets 0 (cleared). This makes the UI
+        // signal reflect live executor state without the executor holding a
+        // metrics pointer. Covers game placements AND live corral placements.
+        for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+            impl_->metrics_buf[i].allowed_core_mask =
+                static_cast<uint32_t>(
+                    impl_->executor.active_applied_mask(impl_->target_buf[i].pid)
+                    & 0xFFFFFFFFull);
+        }
+
         // ── 7. Publish to SHM ─────────────────────────────────────────────
         PHYNNED_PHASE(diag::PhaseShmPublish);
         if (impl_->publisher.is_open()) {
-            // Compute aggregate stats from metrics_buf.
+            // ── Select the bounded top-N view for the SHM (UI contract) ──────
+            // MASS-router: detection tracks up to kMaxTargets (1024) internally,
+            // but the agent↔UI SHM stays kMaxShmTargets (64). Publish only the most
+            // "interesting" slice: placement-eligible processes (games + the curated
+            // set the UI has always shown) rank first, then by CPU% activity. The
+            // full herd is tracked internally but never crosses the SHM boundary.
+            const uint32_t n_all = impl_->n_targets;
+            uint32_t order[observer::kMaxTargets];
+            for (uint32_t i = 0u; i < n_all; ++i) order[i] = i;
+            const auto shm_score = [&](uint32_t i) noexcept -> double {
+                const observer::TargetProcess& tp = impl_->target_buf[i];
+                const observer::TargetMetrics& tm = impl_->metrics_buf[i];
+                double s = static_cast<double>(tm.cpu_usage_pct);
+                if (tp.kind == observer::TargetKind::Game) s += 5.0e5;
+                if (impl_->observer.is_placement_eligible(tp.name)) s += 1.0e6;
+                return s;
+            };
+            std::sort(order, order + n_all,
+                [&](uint32_t a, uint32_t b) noexcept {
+                    return shm_score(a) > shm_score(b);
+                });
+            const uint32_t n_pub = std::min<uint32_t>(n_all,
+                                                      observer::kMaxShmTargets);
+
+            // Aggregate stats over the PUBLISHED set (matches SHM n_targets; not
+            // diluted by the hundreds of idle herd processes now observed).
             uint32_t total_migrations = 0u;
             float    total_pressure   = 0.0f;
-            for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
+            for (uint32_t k = 0u; k < n_pub; ++k) {
+                const uint32_t i = order[k];
+                impl_->shm_targets[k] = impl_->target_buf[i];
+                impl_->shm_metrics[k] = impl_->metrics_buf[i];
                 total_migrations += impl_->metrics_buf[i].migrations_per_sec;
                 total_pressure   += static_cast<float>(
                     impl_->metrics_buf[i].pressure_level) / 2.0f;
             }
             const float aggregate_pressure =
-                (impl_->n_targets > 0u)
-                    ? (total_pressure / static_cast<float>(impl_->n_targets))
+                (n_pub > 0u)
+                    ? (total_pressure / static_cast<float>(n_pub))
                     : 0.0f;
 
             // Publish the real PrivilegeLevel enum value (0=None,
@@ -1188,9 +2116,9 @@ void AgentRuntime::run() noexcept {
             impl_->publisher.publish(
                 priv_level,
                 impl_->etw_active ? 1u : 0u,
-                impl_->target_buf.data(),
-                impl_->n_targets,
-                impl_->metrics_buf.data(),
+                impl_->shm_targets.data(),
+                n_pub,
+                impl_->shm_metrics.data(),
                 impl_->decision_buf.data(),
                 impl_->n_decisions,
                 impl_->executor.active_count(),
@@ -1203,7 +2131,38 @@ void AgentRuntime::run() noexcept {
                 1u /* watchdog_ok — always 1; watchdog sets stop_requested on stall */,
                 // CCD Load Defense telemetry
                 impl_->policy_engine.last_ccd_defense_count(),
-                impl_->policy_engine.last_ccd_defense_cpu_pct());
+                impl_->policy_engine.last_ccd_defense_cpu_pct(),
+                // MASS-router: full internal tracked count (the herd), of which
+                // only n_pub (≤ kMaxShmTargets) crossed into the SHM above.
+                n_all);
+
+            // ── MR-2: publish the background-corral mode (DRY-RUN / LIVE) ──
+            // corral_coexist_block reflects the E5 guard measured this tick.
+            impl_->publisher.set_corral_mode(
+                impl_->corral_live ? 1u : 0u,
+                impl_->coexist_optimizer_present ? 1u : 0u);
+
+            // ── W3/W4: publish the profile + the per-process user rules table ─
+            impl_->publisher.set_profile(
+                static_cast<uint8_t>(impl_->agent_cfg.profile));
+            {
+                const uint32_t nr = impl_->agent_cfg.n_process_rules;
+                for (uint32_t r = 0u; r < nr; ++r) {
+                    const config::ProcessRule& pr =
+                        impl_->agent_cfg.process_rules[r];
+                    ipc::UserRuleShm& u = impl_->shm_user_rules[r];
+                    std::memset(&u, 0, sizeof(u));
+                    std::snprintf(u.name, sizeof(u.name), "%s", pr.name);
+                    std::snprintf(u.path, sizeof(u.path), "%s", pr.path);
+                    u.action = pr.action;
+                    u.flags  = impl_->user_rule_flags[r];
+                    if (pr.path[0] != '\0')
+                        u.flags |= ipc::kUserRuleFlagHasPath;
+                }
+                impl_->publisher.publish_user_rules(
+                    impl_->shm_user_rules.data(), nr,
+                    impl_->user_rules_generation);
+            }
         }
 
         // ── Self-monitor (every kSelfMonitorInterval ticks) ───────────────

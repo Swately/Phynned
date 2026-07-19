@@ -141,7 +141,8 @@ void PhynnedAgentPublisher::publish(
     uint8_t                         deep_idle,
     uint8_t                         watchdog_ok,
     uint32_t                        ccd_defense_count,
-    float                           ccd_defense_cpu_pct
+    float                           ccd_defense_cpu_pct,
+    uint32_t                        n_tracked_total
 ) noexcept {
     if (!layout_) return;
 
@@ -162,19 +163,26 @@ void PhynnedAgentPublisher::publish(
         ++action_read_cursor_;
     }
 
+    // Clamp the published count to the bounded SHM view. The caller is expected
+    // to pass an already-bounded top-N view (≤ kMaxShmTargets); this is a hard
+    // safety clamp so the memcpy can NEVER overflow the fixed-size SHM arrays
+    // even though the agent tracks up to observer::kMaxTargets (1024) internally.
+    uint32_t shm_n = n_targets;
+    if (shm_n > observer::kMaxShmTargets) shm_n = observer::kMaxShmTargets;
+
     // ── Seqlock write begin — seq becomes odd ─────────────────────────────
     shm_write_begin(&layout_->header);
 
     // ── Copy TargetProcess[] ──────────────────────────────────────────────
-    if (n_targets > 0u && targets) {
+    if (shm_n > 0u && targets) {
         std::memcpy(layout_->targets, targets,
-                    n_targets * sizeof(observer::TargetProcess));
+                    shm_n * sizeof(observer::TargetProcess));
     }
 
     // ── Copy TargetMetrics[] ──────────────────────────────────────────────
-    if (n_targets > 0u && metrics) {
+    if (shm_n > 0u && metrics) {
         std::memcpy(layout_->metrics, metrics,
-                    n_targets * sizeof(observer::TargetMetrics));
+                    shm_n * sizeof(observer::TargetMetrics));
     }
 
     // ── Copy PolicyDecision[] ─────────────────────────────────────────────
@@ -185,7 +193,7 @@ void PhynnedAgentPublisher::publish(
 
     // ── Write PhynnedStateHeader in-place ───────────────────────────────────
     // (state is inside the seqlock window → consistent with targets/decisions)
-    layout_->state.n_targets         = n_targets;
+    layout_->state.n_targets         = shm_n;  // bounded count matches memcpy'd rows
     layout_->state.n_decisions       = n_decisions;
     layout_->state.n_active_actions  = n_active_actions;
     layout_->state.agent_connected   = 1u;
@@ -201,6 +209,8 @@ void PhynnedAgentPublisher::publish(
     // CCD Load Defense telemetry
     layout_->state.ccd_defense_count   = ccd_defense_count;
     layout_->state.ccd_defense_cpu_pct = ccd_defense_cpu_pct;
+    // MASS-router: full internal tracked count (≥ shm_n published above).
+    layout_->state.n_tracked_total     = n_tracked_total;
 
     // ── Seqlock write end — seq becomes even ─────────────────────────────
     shm_write_end(&layout_->header);
@@ -236,6 +246,16 @@ void PhynnedAgentPublisher::set_policies_paused(uint8_t paused) noexcept {
     layout_->state.policies_paused = paused;
 }
 
+// ── set_corral_mode() — MR-2 ──────────────────────────────────────────────────
+void PhynnedAgentPublisher::set_corral_mode(uint8_t live,
+                                            uint8_t coexist_block) noexcept {
+    if (!layout_) return;
+    // Two single-byte writes; each atomic on x86/ARM — no seqlock needed. The
+    // UI reads them without a lock to render the DRY-RUN / LIVE mode indicator.
+    layout_->state.corral_live          = live;
+    layout_->state.corral_coexist_block = coexist_block;
+}
+
 // ── set_self_resources() ──────────────────────────────────────────────────────
 void PhynnedAgentPublisher::set_self_resources(float cpu_pct, float rss_mb) noexcept {
     if (!layout_) return;
@@ -244,6 +264,33 @@ void PhynnedAgentPublisher::set_self_resources(float cpu_pct, float rss_mb) noex
     // independently and both lag by at most one SelfMonitor sample (~500 ms).
     layout_->state.self_cpu_pct = cpu_pct;
     layout_->state.self_rss_mb  = rss_mb;
+}
+
+// ── set_profile() — W4 ─────────────────────────────────────────────────────────
+void PhynnedAgentPublisher::set_profile(uint8_t profile) noexcept {
+    if (!layout_) return;
+    // Single-byte store is atomic on x86/ARM — no seqlock needed (same pattern as
+    // set_policies_paused / set_corral_mode).
+    layout_->state.profile = profile;
+}
+
+// ── publish_user_rules() — W3 ──────────────────────────────────────────────────
+void PhynnedAgentPublisher::publish_user_rules(const UserRuleShm* rules,
+                                               uint32_t           n_rules,
+                                               uint32_t           generation) noexcept {
+    if (!layout_) return;
+    if (n_rules > kMaxUserRulesShm) n_rules = kMaxUserRulesShm;
+
+    // Its own seqlock transaction. The UserRulesBlock is read directly by the UI
+    // (like targets/metrics), so a consistent reader retries while seq is odd.
+    shm_write_begin(&layout_->header);
+    layout_->user_rules.n_rules    = n_rules;
+    layout_->user_rules.generation = generation;
+    if (n_rules > 0u && rules) {
+        std::memcpy(layout_->user_rules.rules, rules,
+                    static_cast<size_t>(n_rules) * sizeof(UserRuleShm));
+    }
+    shm_write_end(&layout_->header);
 }
 
 // ── mark_disconnected() ───────────────────────────────────────────────────────

@@ -177,6 +177,8 @@ public:
             // CCD Load Defense telemetry
             state_.snap.ccd_defense_count   = st->ccd_defense_count;
             state_.snap.ccd_defense_cpu_pct = st->ccd_defense_cpu_pct;
+            // MASS-router: full internal tracked count (≥ target_count shown).
+            state_.snap.total_tracked       = st->n_tracked_total;
             state_.etw_active               = st->etw_active;
             // Hardware classification (v1.0): static after agent probe, but
             // we copy each tick anyway (idempotent; ~4 bytes, no perf cost).
@@ -186,6 +188,11 @@ public:
             state_.snap.e_core_count = st->e_core_count;
             // Runtime control state (Start/Pause/Reset flow).
             state_.snap.policies_paused = st->policies_paused;
+            // MR-2 background corral mode (DRY-RUN / LIVE + E5 coexistence block).
+            state_.snap.corral_live          = st->corral_live;
+            state_.snap.corral_coexist_block = st->corral_coexist_block;
+            // W4 global profile (Monitor / Games / GamesCorral / Full).
+            state_.snap.profile              = st->profile;
             // Agent self-resource accounting (published by SelfMonitor
             // every ~500 ms). Routes into PhynnedAppState's top-level
             // fields, not inside `snap`, because the existing widgets

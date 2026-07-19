@@ -353,6 +353,8 @@ std::expected<void, phyriad::Error> PerGameMemory::load(const char* path) noexce
                 extract_string(rhs, cur.last_validated, sizeof(cur.last_validated));
             } else if (std::strcmp(key, "user_locked") == 0) {
                 cur.user_locked = extract_bool(rhs);
+            } else if (std::strcmp(key, "ac_probe") == 0) {
+                cur.ac_probe = static_cast<uint8_t>(extract_uint(rhs));
             } else if (std::strcmp(key, "best_core_mask") == 0) {
                 const char* vp = ltrim(rhs);
                 char* end = nullptr;
@@ -505,7 +507,8 @@ std::expected<void, phyriad::Error> PerGameMemory::save(const char* path) noexce
         std::fprintf(f, "improvement_pct = %.2f\n", static_cast<double>(e.improvement_pct));
         std::fprintf(f, "sample_count    = %u\n", e.sample_count);
         std::fprintf(f, "last_validated  = \"%s\"\n", e.last_validated);
-        std::fprintf(f, "user_locked     = %s\n\n", e.user_locked ? "true" : "false");
+        std::fprintf(f, "user_locked     = %s\n", e.user_locked ? "true" : "false");
+        std::fprintf(f, "ac_probe        = %u\n\n", static_cast<unsigned>(e.ac_probe));
     }
 
     // Write bad-list.

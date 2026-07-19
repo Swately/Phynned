@@ -203,6 +203,12 @@ if(PHYNNED_BUILD_TOOLS)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/phynned-bench/CMakeLists.txt)
         add_subdirectory(tools/phynned-bench)
     endif()
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/phynned-acprobe/CMakeLists.txt)
+        add_subdirectory(tools/phynned-acprobe)   # CR1 M0-safety probe harness
+    endif()
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/phynned-revert/CMakeLists.txt)
+        add_subdirectory(tools/phynned-revert)    # DR1 crash-recovery dead-man
+    endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/installer/CMakeLists.txt)
         add_subdirectory(tools/installer)
     endif()
@@ -212,7 +218,7 @@ endif()
 # user-facing top-level stays clean (only phynned-ui.exe at the root).
 # Done in one shot AFTER all add_subdirectory() calls so we don't need
 # to modify each tool's CMakeLists.txt individually.
-foreach(_phynned_exe phynned-agent phynned-cli phynned-bench phynned-service-register)
+foreach(_phynned_exe phynned-agent phynned-cli phynned-bench phynned-acprobe phynned-revert phynned-service-register)
     if(TARGET ${_phynned_exe})
         set_target_properties(${_phynned_exe} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${PHYNNED_INTERNAL_RUNTIME_DIRECTORY}")
@@ -253,7 +259,7 @@ endif()
 # all three into the .exe (no-op on MSVC / Linux / Clang).
 # Applied AFTER all targets are defined, in one shot. See root CMakeLists.txt
 # for the function definition.
-foreach(_phynned_exe phynned-ui phynned-agent phynned-cli phynned-bench phynned-service-register)
+foreach(_phynned_exe phynned-ui phynned-agent phynned-cli phynned-bench phynned-acprobe phynned-revert phynned-service-register)
     if(TARGET ${_phynned_exe})
         phyriad_static_mingw_runtime(${_phynned_exe})
     endif()

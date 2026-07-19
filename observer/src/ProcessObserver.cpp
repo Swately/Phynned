@@ -3,12 +3,74 @@
 //
 
 #include <phynned/observer/ProcessObserver.hpp>
+#include <phynned/observer/ProcessClassifier.hpp>   // kSystemNames / kLauncherHelperNames denylists
+#include <phynned/observer/AcDriverOracle.hpp>       // zero-handle AC do-not-touch title map
 #include <phyriad/process/ProcessEnumerator.hpp>
 #include <algorithm>
 #include <cstring>
 #include <cctype>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
 namespace phynned::observer {
+
+// ── Touchable filter helpers (MASS-router, 2026-07-17) ─────────────────────
+namespace {
+
+// Case-insensitive exact basename match against a nullptr-terminated list.
+bool name_in_list(const char* exe, const char* const* list) noexcept {
+    if (!exe || !exe[0]) return false;
+    for (const char* const* p = list; *p != nullptr; ++p) {
+#ifdef _WIN32
+        if (_stricmp(exe, *p) == 0) return true;
+#else
+        // Case-insensitive compare without <strings.h> for portability.
+        const char* a = exe; const char* b = *p;
+        bool eq = true;
+        while (*a && *b) {
+            if (std::tolower(static_cast<unsigned char>(*a)) !=
+                std::tolower(static_cast<unsigned char>(*b))) { eq = false; break; }
+            ++a; ++b;
+        }
+        if (eq && *a == '\0' && *b == '\0') return true;
+#endif
+    }
+    return false;
+}
+
+// (d)/(e): open the LIGHTEST possible handle (PROCESS_QUERY_LIMITED_INFORMATION —
+// the same right Task Manager uses; NOT the SET/VM_READ cheat-shaped handle) and
+// read the affinity mask. Returns true only when the process is openable AND runs
+// on the system-default full mask (i.e. it has NOT self-restricted its affinity).
+//   - open fails            → (e) PPL/protected            → NOT touchable
+//   - proc_mask != sys_mask → (d) self-managed affinity    → NOT touchable
+// Only ever called AFTER the zero-handle string exclusions, so a denylisted /
+// AC-protected title is never handle-opened here.
+bool has_default_affinity(uint32_t pid) noexcept {
+#ifdef _WIN32
+    if (pid == 0u || pid == 4u) return false;  // System Idle / System
+    const HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 static_cast<DWORD>(pid));
+    if (!h) return false;  // (e) PPL / protected / access denied
+    DWORD_PTR proc_mask = 0, sys_mask = 0;
+    const BOOL ok = GetProcessAffinityMask(h, &proc_mask, &sys_mask);
+    CloseHandle(h);
+    if (!ok || proc_mask == 0u || sys_mask == 0u) return false;
+    // (d) self-managed: process constrained itself to a subset of the system.
+    if (proc_mask != sys_mask) return false;
+    return true;
+#else
+    (void)pid;
+    return true;  // no affinity-introspection lever on Linux yet → treat as touchable
+#endif
+}
+
+} // namespace
 
 // ── Constructor / Destructor ──────────────────────────────────────────────
 ProcessObserver::ProcessObserver() noexcept {
@@ -143,6 +205,29 @@ void ProcessObserver::update_target(uint32_t pid, uint32_t parent_pid,
     t.name[sizeof(t.name) - 1u] = '\0';
 }
 
+// ── Touchable filter (MASS-router) ────────────────────────────────────────
+bool ProcessObserver::is_tracked(uint32_t pid) const noexcept {
+    for (uint32_t i = 0u; i < n_targets_; ++i)
+        if (targets_[i].pid == pid) return true;
+    return false;
+}
+
+bool ProcessObserver::is_touchable(const char* exe_name, uint32_t pid) noexcept {
+    if (!exe_name || !exe_name[0]) return false;
+    // (a) OS / anti-cheat SYSTEM denylist — pure string, ZERO handle.
+    if (name_in_list(exe_name, kSystemNames)) return false;
+    // (c) game launcher / helper processes — pure string, ZERO handle.
+    if (name_in_list(exe_name, kLauncherHelperNames)) return false;
+    // (b) AC-protected DO-NOT-TOUCH title — static title map, ZERO handle.
+    //     Only excludes the classes where a placement probe is forbidden
+    //     (SilentPunish_C / UnknownAc); AC titles that are safe to probe
+    //     (CleanBlock_A / Allow_B) remain observable (placement still gated later).
+    if (!AcDriverOracle::probe_allowed(
+            AcDriverOracle::classify_title(exe_name))) return false;
+    // (d)/(e) handle-based checks LAST — never reached for a denylisted / AC title.
+    return has_default_affinity(pid);
+}
+
 void ProcessObserver::expire_dead_targets() noexcept {
     // Compact: remove any target not refreshed this cycle (status != Running)
     uint32_t write = 0u;
@@ -173,10 +258,19 @@ void ProcessObserver::refresh() noexcept {
     static thread_local phyriad::proc::ProcessEntry s_entries[phyriad::proc::kMaxProcesses];
     const uint32_t n = phyriad::proc::enumerate_processes(s_entries,
                                                        phyriad::proc::kMaxProcesses);
+    // MASS-router detection inversion (2026-07-17): TRACK ALL TOUCHABLE.
+    // The old pattern-gate (`matches_any_pattern`) is gone from the tracking path
+    // — a process is now observed unless the touchable filter excludes it
+    // (denylist / AC do-not-touch title / launcher-helper / self-managed mask /
+    // PPL). Already-tracked PIDs skip the (handle-opening) filter and just refresh
+    // their status, so the QUERY_LIMITED probe runs at most once per PID lifetime.
+    // Placement remains pattern-gated downstream — see is_placement_eligible().
     for (uint32_t i = 0u; i < n; ++i) {
         const auto& e = s_entries[i];
-        if (matches_any_pattern(e.name)) {
-            update_target(e.pid, e.parent_pid, e.name);
+        if (is_tracked(e.pid)) {
+            update_target(e.pid, e.parent_pid, e.name);  // refresh status only
+        } else if (is_touchable(e.name, e.pid)) {
+            update_target(e.pid, e.parent_pid, e.name);  // admit new touchable proc
         }
     }
 

@@ -177,6 +177,10 @@ inline constexpr const char* kLauncherHelperNames[] = {
 };
 
 /// Well-known Windows OS processes — never touched by Phynned.
+/// MASS-router (2026-07-17): also the touchable-filter denylist (ProcessObserver::
+/// is_touchable). Extended with the real-time audio engine and anti-cheat SERVICE
+/// processes so track-all-touchable never observes/touches them (the AC *game* is
+/// handled separately by AcDriverOracle's zero-handle title map).
 inline constexpr const char* kSystemNames[] = {
     "System",         "Registry",        "smss.exe",
     "csrss.exe",      "wininit.exe",     "winlogon.exe",
@@ -184,6 +188,14 @@ inline constexpr const char* kSystemNames[] = {
     "fontdrvhost.exe","dwm.exe",         "explorer.exe",
     "SearchIndexer.exe","WmiPrvSE.exe",  "spoolsv.exe",
     "MsMpEng.exe",    "SecurityHealth.exe",
+    // ── Real-time audio (interference-sensitive; also runs protected) ───────
+    "audiodg.exe",    // Windows audio device graph isolation
+    // ── Anti-cheat SERVICE processes (the service/driver is denylistable; the
+    //     protected GAME is NOT — that stays with AcDriverOracle) ────────────
+    "EasyAntiCheat.exe",       "EasyAntiCheat_EOS.exe",
+    "EasyAntiCheatService.exe",
+    "BEService.exe",           "BEServiceGlobal.exe",
+    "vgc.exe",                 "vgtray.exe",   // Riot Vanguard service/tray
     nullptr,
 };
 

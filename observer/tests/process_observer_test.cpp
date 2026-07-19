@@ -5,7 +5,10 @@
 // Verifies:
 //   - POD sizes.
 //   - Pattern add/remove.
-//   - After refresh(), dead patterns produce 0 targets.
+//   - MASS-router (2026-07-17): refresh() now TRACKS ALL TOUCHABLE processes,
+//     decoupled from name patterns. Patterns only gate PLACEMENT
+//     (is_placement_eligible), not tracking. Tests 4/5 updated from the old
+//     pattern-gate contract ("nonexistent pattern → 0 targets") to the new one.
 //   - Linear lookup correctness.
 //
 
@@ -49,23 +52,33 @@ int main() {
         std::printf("[OK] Pattern registration and refresh\n");
     }
 
-    // ── Test 4: Snapshot with no matches ──────────────────────────────────
+    // ── Test 4: Detection is track-all-touchable, NOT pattern-gated ───────
+    // MASS-router: even with only a nonexistent pattern registered, refresh()
+    // tracks the box's touchable processes (the old contract asserted 0 here).
     {
         phynned::observer::ProcessObserver obs;
         obs.add_target_pattern("__nonexistent_exe_xyz123__");
         obs.refresh();
-        assert(obs.target_count() == 0u);
-        std::printf("[OK] No matches for nonexistent pattern\n");
+        // A live box always has ≥1 touchable process; tracking is bounded.
+        assert(obs.target_count() > 0u);
+        assert(obs.target_count() <= phynned::observer::kMaxTargets);
+        // A pattern the process does not match must NOT make it placement-eligible.
+        assert(!obs.is_placement_eligible("some_random_untracked_name.exe"));
+        std::printf("[OK] Track-all-touchable decoupled from patterns: %u tracked\n",
+                    obs.target_count());
     }
 
-    // ── Test 5: Clear patterns ────────────────────────────────────────────
+    // ── Test 5: Clearing patterns does not stop tracking ──────────────────
+    // Patterns now gate PLACEMENT only; clearing them leaves detection intact.
     {
         phynned::observer::ProcessObserver obs;
-        obs.add_target_pattern("notepad");
+        obs.add_target_pattern("chrome");
+        assert(obs.is_placement_eligible("chrome.exe"));  // pattern matches
         obs.clear_target_patterns();
         obs.refresh();
-        assert(obs.target_count() == 0u);
-        std::printf("[OK] Clear patterns\n");
+        assert(obs.target_count() > 0u);                  // still tracking touchable
+        assert(!obs.is_placement_eligible("chrome.exe")); // no longer eligible
+        std::printf("[OK] Detection survives pattern-clear; placement gate follows patterns\n");
     }
 
     // ── Test 6: Snapshot capacity ─────────────────────────────────────────

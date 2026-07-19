@@ -21,6 +21,7 @@
 #pragma once
 
 #include <phynned/action/ActionLog.hpp>
+#include <phynned/action/RevertJournal.hpp>   // DR1 — crash-durable write-ahead journal
 #include <phynned/policy/PolicyDecision.hpp>
 #include <phyriad/schema/Error.hpp>
 
@@ -34,11 +35,16 @@ namespace phynned::action {
 struct ActiveAction {
     uint32_t pid;                  ///< Target PID.
     uint32_t rule_id;
-    uint64_t prev_affinity_mask;   ///< Affinity before Phynned touched it.
+    uint64_t prev_affinity_mask;   ///< Affinity before Phynned touched it (the DR1 revert target).
     uint32_t prev_priority_class;  ///< Priority class before.
     uint64_t new_affinity_mask;    ///< Affinity Phynned applied (recorded in audit log).
     uint32_t new_priority_class;   ///< Priority Phynned applied.
     uint64_t tsc_applied;
+    // ── DR1 journal key (pid, creation_time) + exe basename ──────────────────
+    // creation_time survives PID recycle; both mirror the RevertJournal record
+    // so revert()/revert_all() can flip the journal entry to REVERTED.
+    uint64_t creation_time;        ///< Process creation FILETIME (0 if unavailable).
+    char     exe_name[64];         ///< Basename, null-terminated (journal key + audit).
     bool     active;               ///< True if this action is still in effect.
 };
 
@@ -68,8 +74,20 @@ public:
     // ── Apply ──────────────────────────────────────────────────────────────
     /// Apply a policy decision. Captures previous state for revert.
     /// Returns Ok on success. On PermissionDenied: logs to stderr, no crash.
+    /// Thin wrapper that self-queries exe/creation-time for the DR1 journal.
     [[nodiscard]] std::expected<void, phyriad::Error>
     apply(const policy::PolicyDecision& d) noexcept;
+
+    /// DR1 overload — plumbs the target's exe basename + process creation-time
+    /// (FILETIME) into the write-ahead RevertJournal so a placement survives a
+    /// `taskkill /f` of the agent: the next instance's recover() reverts it to
+    /// its CAPTURED prev mask (not all-cores). `creation_time == 0` or a
+    /// null/empty `exe_name` → apply() self-queries them from the live PID
+    /// (TargetProcess carries neither field — see AgentRuntime plumbing).
+    [[nodiscard]] std::expected<void, phyriad::Error>
+    apply(const policy::PolicyDecision& d,
+          const char* exe_name,
+          uint64_t    creation_time) noexcept;
 
     /// Apply differential pin (Rule 7 — PinHotThreadDifferential).
     ///
@@ -97,6 +115,23 @@ public:
     /// Revert ALL active actions. Called on shutdown.
     void revert_all() noexcept;
 
+    /// Selectively revert only the process-level active actions whose
+    /// `rule_id` matches `rule_id` (R3 — use-modes). Reuses the exact per-action
+    /// revert path (captured prev mask + journal mark_reverted + audit log), then
+    /// compacts the table. Used by corral-off and profile transitions to revert
+    /// ONLY corral (kCorralRuleId) or user-pin (kUserRuleId) placements while
+    /// leaving game pins untouched. Thread-level differential pins (Rule 7, a
+    /// game path) are never corral/user rules, so they are intentionally not
+    /// touched here. Returns the number of actions reverted.
+    ///
+    /// `exe_filter` (optional): additionally restrict to actions whose recorded
+    /// exe_name matches case-insensitively. Used by user-rule REMOVAL so that
+    /// deleting an Always rule also undoes the pins that rule caused (same
+    /// off-means-undo semantics the operator chose for the corral switch),
+    /// without touching pins from OTHER user rules.
+    uint32_t revert_by_rule_id(uint32_t rule_id,
+                               const char* exe_filter = nullptr) noexcept;
+
     /// Drop any active actions whose target PID is no longer in the
     /// caller-supplied "live" set. Does NOT call SetProcessAffinityMask
     /// because the process is already gone — the kernel cleaned it up;
@@ -121,6 +156,14 @@ public:
 
     [[nodiscard]] uint32_t active_count() const noexcept;
 
+    /// Fix A (MR-2): the affinity mask Phynned currently HAS applied to `pid`,
+    /// or 0 if there is no active action for it. Lets AgentRuntime reconcile
+    /// TargetMetrics::allowed_core_mask each tick (MetricsCollector zeroes it every
+    /// sample), so the UI "routed" (green affinity) signal reflects live executor
+    /// state and clears automatically the moment an action is reverted/pruned.
+    /// Checks the process-level table first, then the differential-pin table.
+    [[nodiscard]] uint64_t active_applied_mask(uint32_t pid) const noexcept;
+
 private:
     // ── Pre-allocated active action table ────────────────────────────────
     static constexpr uint32_t kMaxActiveActions = 32u;
@@ -136,22 +179,30 @@ private:
     void revert_thread_action(ActiveThreadAction& a) noexcept;
 
     // System-wide default affinity mask cached at construction time.
-    // revert() restores targets to this mask instead of the per-action
-    // `prev_affinity_mask` captured at apply time.
     //
-    // Rationale: if a previous Phynned instance crashed without graceful
-    // shutdown, the residual pinned affinity persists in the target. The
-    // next instance reads that residual as the target's "previous" affinity
-    // when it applies a new policy, and on revert would restore the residual
-    // value — never the true OS default. Over multiple crash/restart cycles
-    // "default" affinity drifts narrower.
+    // INVARIANT CHANGE (DR1, S3 — 2026-07-17): revert()/revert_all() now restore
+    // each process-level action to its CAPTURED `prev_affinity_mask`, NOT to this
+    // default. The crash-residual-drift hazard that formerly forced the all-cores
+    // revert is gone: the write-ahead RevertJournal (opened in the constructor)
+    // authoritatively distinguishes "my own live placement" from "a crashed prior
+    // instance's residual". On start the constructor calls journal_.recover() and
+    // reverts every surviving record whose process_still_matches() to its captured
+    // prev BEFORE the tick loop, so a residual can no longer be misread as a
+    // "previous" mask and re-restored narrower each crash cycle.
     //
-    // Tradeoff: this loses preservation of any pre-Phynned manual user pinning
-    // (e.g. user ran `Start /AFFINITY 0xF` before launching the game). For
-    // Phynned's target audience (gamers, streamers), this is a non-issue —
-    // they don't manually pin. The benefit of guaranteed clean revert across
-    // crash recovery dramatically outweighs the cost.
+    // default_affinity_mask_ is now used only as (a) the CLAMP for
+    // apply_differential_pin's ~0ull "full system" sentinel, (b) the revert
+    // target for the NON-journaled differential-pin thread actions (which still
+    // revert to default — they are not journaled, so captured-prev would
+    // reintroduce the drift), and (c) a fallback when an action has no captured
+    // prev (prev_affinity_mask == 0 → nothing to restore, left untouched).
     uint64_t default_affinity_mask_{~0ull};
+
+    // ── DR1: crash-durable write-ahead revert journal ────────────────────────
+    // Opened to default_path() in the constructor; record_pending (flushed)
+    // BEFORE each Set*, mark_applied after, mark_reverted on revert. recover()
+    // runs in the constructor to reconcile a crashed instance's residual.
+    RevertJournal journal_;
 
     ActionLogRing log_;
     // snapshot_log() is stateless — uses write_cursor()/peek_at() with a
@@ -160,10 +211,6 @@ private:
     ActiveAction* find_active(uint32_t pid) noexcept;
     void log_entry(const ActiveAction& a, bool success,
                    bool is_revert = false) noexcept;
-
-    [[nodiscard]] std::expected<void, phyriad::Error>
-    apply_pin_affinity(uint32_t pid, uint64_t mask,
-                       uint64_t& out_prev_mask) noexcept;
 
     [[nodiscard]] std::expected<void, phyriad::Error>
     apply_set_priority(uint32_t pid, uint32_t pclass,

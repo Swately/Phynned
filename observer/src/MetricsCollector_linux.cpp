@@ -76,7 +76,7 @@ MetricsCollector::find_or_create_pid_state(uint32_t pid) noexcept {
     s = PidState{};
     s.pid   = pid;
     s.valid = true;
-    pid_hash_insert(pid, static_cast<uint8_t>(new_idx));
+    pid_hash_insert(pid, static_cast<uint16_t>(new_idx));
     return &s;
 }
 
@@ -96,7 +96,8 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
         (++bulk_capture_counter_ >= kBulkCaptureInterval);
     if (do_capture) bulk_capture_counter_ = 0u;
 
-    phyriad::proc::ProcessMetrics bulk[kMaxTargets]{};
+    // Off-stack scratch (Impl member) — avoids a 64 KB stack frame at MASS cap.
+    phyriad::proc::ProcessMetrics* bulk = bulk_scratch_.data();
     bool snapshot_ok = false;
 
     if (do_capture && snapshot_.has_value()) {

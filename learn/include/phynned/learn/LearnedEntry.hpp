@@ -15,6 +15,15 @@
 
 namespace phynned::learn {
 
+/// AC-probe verdict stored in LearnedEntry::ac_probe (CR1 safety gate).
+/// Written once, ever, by the AcProbe least-privilege probe; makes a title
+/// probed at most one time across all launches ("one probe per exe-identity").
+enum AcProbeLabel : uint8_t {
+    AcProbeUnknown = 0u,   ///< never probed
+    AcProbeAllowed = 1u,   ///< SET right exercised; no-op affinity set succeeded
+    AcProbeBlocked = 2u,   ///< OpenProcess/Set denied (or conservative) → never touch
+};
+
 /// One validated per-game policy record.
 struct alignas(8) LearnedEntry {
     // ── Key: (exe, hardware_id) uniquely identifies a learned rule ────────
@@ -34,7 +43,13 @@ struct alignas(8) LearnedEntry {
 
     // ── User override ─────────────────────────────────────────────────────
     bool     user_locked;          ///< True → skip re-evaluation.
-    uint8_t  _pad[15];             ///< Pad to 192B (3 cache lines).
+
+    // ── Anti-cheat probe verdict (CR1) ────────────────────────────────────
+    /// Permanent per-exe least-privilege AC-probe label (AcProbeLabel).
+    /// 0 = never probed. Persisted in memory.toml so the probe never re-runs
+    /// on a title already labelled ALLOWED or BLOCKED.
+    uint8_t  ac_probe;             ///< AcProbeLabel: 0=unknown, 1=allowed, 2=blocked.
+    uint8_t  _pad[14];             ///< Pad to 192B (3 cache lines).
 };
 
 static_assert(sizeof(LearnedEntry) == 192u,
