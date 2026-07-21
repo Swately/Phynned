@@ -157,6 +157,27 @@ public:
         }
 
         // 4. Sync SHM → PhynnedSnapshotMini.
+        // DEAD-AGENT DETECTION (2026-07-19 soak fix): the mapping outlives a
+        // hard-killed agent, and its agent_connected byte stays 1 forever —
+        // the soak UI kept rendering frozen stale data as "connected". The
+        // real liveness signal is last_publish_tsc advancing (~1 Hz); if it
+        // hasn't moved for ~5 s of frames, report disconnected so every panel
+        // shows its honest "agent is not running" state.
+        {
+            const uint64_t pub = client_.state()
+                ? client_.state()->last_publish_tsc : 0ull;
+            if (pub != last_seen_publish_tsc_) {
+                last_seen_publish_tsc_ = pub;
+                frames_publish_stalled_ = 0u;
+            } else if (frames_publish_stalled_ < 0xFFFFu) {
+                ++frames_publish_stalled_;
+            }
+        }
+        if (frames_publish_stalled_ > kPublishStallFrames) {
+            state_.snap.agent_connected = 0u;
+            (void)out_state.publish(state_);
+            return {};
+        }
         state_.snap.agent_connected = 1u;
 
         const auto targets   = client_.targets();
@@ -252,6 +273,13 @@ private:
     PhynnedAppState            state_{};
     uint64_t                 last_reconnect_tsc_{0u};
     uint64_t                 reconnect_interval_tsc_{2'000'000'000ull};
+
+    // Dead-agent detection (2026-07-19): last_publish_tsc must keep advancing
+    // (~1 Hz) for the agent to count as alive. ~300 frames at the 60 Hz paced
+    // loop ≈ 5 s of publish silence → report disconnected.
+    uint64_t last_seen_publish_tsc_{0ull};
+    uint16_t frames_publish_stalled_{0u};
+    static constexpr uint16_t kPublishStallFrames = 300u;
 
     // ── System tray (§9.5) ───────────────────────────────────────────────────
     PhynnedTrayIcon tray_{};

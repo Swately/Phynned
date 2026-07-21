@@ -226,6 +226,55 @@ private:
     std::array<HotTrackState, kMaxHotTrackStates> hot_track_{};
     uint32_t n_hot_track_{0u};
 
+    // ── Long-run eviction (2026-07-19 soak fix) ──────────────────────────
+    // n_pid_states_ / n_hot_track_ were APPEND-ONLY: after 1024 distinct PIDs
+    // (hours of browser/launcher churn — LoL relaunches a same-name game exe
+    // with a fresh PID every match) find_or_create returned nullptr forever,
+    // leaving every NEW process metrics-blind = the soak's "erratic
+    // detection". sample() receives the full live tracked set each tick, so
+    // every kEvictSweepInterval ticks we mark the tracked slots and evict the
+    // rest: hash entry tombstoned (linear-probe chains stay connected), the
+    // hot-track slot freed, and the PidState slot pushed on a free list that
+    // find_or_create pops before growing the high-water mark.
+    static constexpr uint32_t kEvictSweepInterval = 30u;   // ~30 s at 1 Hz
+    static constexpr uint32_t kPidTombstone = 0xFFFFFFFFu; // never a real PID
+    uint32_t evict_sweep_counter_{0u};
+    std::array<uint16_t, kMaxPidStates>      free_slots_{};
+    uint32_t n_free_slots_{0u};
+    std::array<uint16_t, kMaxHotTrackStates> hot_free_{};
+    uint32_t n_hot_free_{0u};
+
+    /// Evict every valid PidState whose pid is NOT in `pids[0..n)`.
+    void evict_absent_pids(const uint32_t* pids, uint32_t n) noexcept;
+
+    /// Release `s`'s hot-track slot (if owned) back to the hot free list.
+    void release_hot_track(PidState& s) noexcept {
+        if (s.hot_slot_plus_1 == 0u) return;
+        const uint32_t hs = s.hot_slot_plus_1 - 1u;
+        if (hs < kMaxHotTrackStates && hot_track_[hs].owner_pid == s.pid) {
+            hot_track_[hs].owner_pid = 0u;
+            if (n_hot_free_ < kMaxHotTrackStates)
+                hot_free_[n_hot_free_++] = static_cast<uint16_t>(hs);
+        }
+        s.hot_slot_plus_1 = 0u;
+    }
+
+    /// Tombstone `pid`'s hash entry (keeps probe chains connected — a plain
+    /// clear would orphan every entry that probed past this slot).
+    void pid_hash_remove(uint32_t pid) noexcept {
+        if (pid == 0u) return;
+        const uint32_t h = pid & kPidHashMask;
+        for (uint32_t probe = 0u; probe < kPidHashSize; ++probe) {
+            auto& e = pid_hash_[(h + probe) & kPidHashMask];
+            if (e.pid == 0u) return;               // not present
+            if (e.pid == pid) {
+                e.pid = kPidTombstone;
+                e.slot_plus_1 = 0u;
+                return;
+            }
+        }
+    }
+
     // Off-stack scratch for the per-tick bulk NtQSI/proc extract (kMaxTargets ×
     // 64B = 64 KB) — an Impl member, not a sample()-local, so the MASS cap does
     // not put a 64 KB array on the run() thread stack.
@@ -270,7 +319,8 @@ private:
         uint32_t h = pid & kPidHashMask;
         for (uint32_t probe = 0u; probe < kPidHashSize; ++probe) {
             auto& e = pid_hash_[(h + probe) & kPidHashMask];
-            if (e.pid == 0u) {
+            // Reuse tombstoned slots (eviction fix) as well as empty ones.
+            if (e.pid == 0u || e.pid == kPidTombstone) {
                 e.pid = pid;
                 e.slot_plus_1 = static_cast<uint16_t>(slot_idx + 1u);
                 return;

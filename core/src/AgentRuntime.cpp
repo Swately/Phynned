@@ -465,6 +465,23 @@ struct AgentRuntime::Impl {
     static constexpr uint32_t kMaxCorralLogPerTick = 16u;
     std::array<CorralLogSlot, kAdviceLogSlots> corral_log_cache{};
 
+    // ── Corral apply-failure backoff (2026-07-19 soak fix, S3) ────────────
+    // The soak's journal.bin churn (365 KB in hours) was the corral RETRYING
+    // protected processes EVERY tick: sppsvc-class services pass the predicate
+    // (full mask, active), get_process_affinity succeeds, the SET is denied →
+    // a fresh write-ahead PENDING journal record per tick per pid, forever
+    // (the dead-man later found 47 such stale PENDING rows). Backoff: after a
+    // failed apply, skip that pid for kCorralFailBackoffTicks; after
+    // kCorralFailMax consecutive failures, blacklist it for the session.
+    struct CorralFailSlot {
+        uint32_t pid{0u};
+        uint8_t  fails{0u};
+        uint32_t next_try_tick{0u};   // UINT32_MAX = session blacklist
+    };
+    static constexpr uint32_t kCorralFailBackoffTicks = 60u;  // ~1 min at 1 Hz
+    static constexpr uint8_t  kCorralFailMax          = 3u;
+    std::array<CorralFailSlot, kAdviceLogSlots> corral_fail_cache{};
+
     // ── W3 per-process user rules (persistent, from policies.toml) ─────────
     // agent_cfg holds the rules (single writer). user_rules_generation bumps on
     // every mutation (SetProcessRule / RemoveProcessRule) so a stale UI remove is
@@ -1763,6 +1780,22 @@ void AgentRuntime::run() noexcept {
                     continue;  // ← the structural no-op: dry-run stops here
                 }
 
+                // ── IDEMPOTENCY (2026-07-19 soak fix): if WE already hold this
+                // exact mask on the pid, there is nothing to do — without this
+                // the ≤5-tick cached-mask window re-applied (and re-journaled)
+                // the same placement several times per corral entry.
+                if (impl_->executor.active_applied_mask(tp.pid) ==
+                    cd.target_mask)
+                    continue;
+
+                // ── FAILURE BACKOFF (2026-07-19 soak fix, S3 journal churn) ──
+                const uint32_t now_tick =
+                    phyriad::hal::stat_load_relaxed(impl_->tick_count);
+                Impl::CorralFailSlot& fslot =
+                    impl_->corral_fail_cache[tp.pid % Impl::kAdviceLogSlots];
+                if (fslot.pid == tp.pid && now_tick < fslot.next_try_tick)
+                    continue;   // backing off / session-blacklisted
+
                 // ── LIVE: reuse the EXISTING executor.apply (journal + revert;
                 // the §6 AC-gate is moot here — corral candidates are non-Game by
                 // predicate). No second Set* path. ────────────────────────────
@@ -1776,6 +1809,16 @@ void AgentRuntime::run() noexcept {
                 d.confidence     = 100u;
                 const auto ar =
                     impl_->executor.apply(d, tp.name, /*creation_time=*/0ull);
+                if (!ar) {
+                    if (fslot.pid != tp.pid) { fslot.pid = tp.pid; fslot.fails = 0u; }
+                    if (fslot.fails < 0xFFu) ++fslot.fails;
+                    fslot.next_try_tick =
+                        (fslot.fails >= Impl::kCorralFailMax)
+                            ? UINT32_MAX   // session blacklist — stop the churn
+                            : now_tick + Impl::kCorralFailBackoffTicks;
+                } else if (fslot.pid == tp.pid) {
+                    fslot = Impl::CorralFailSlot{};   // success clears the record
+                }
                 if (changed && n_logged < Impl::kMaxCorralLogPerTick) {
                     slot.pid = tp.pid; slot.last_state = state_now;
                     std::fprintf(stdout,

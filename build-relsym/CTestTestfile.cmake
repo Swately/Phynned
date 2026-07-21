@@ -1,0 +1,38 @@
+# CMake generated Testfile for 
+# Source directory: G:/Phyriad/projects/Phynned
+# Build directory: G:/Phyriad/projects/Phynned/build-relsym
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+subdirs("_phyriad_build/hal")
+subdirs("_phyriad_build/schema")
+subdirs("_phyriad_build/transport")
+subdirs("_phyriad_build/topology")
+subdirs("_phyriad_build/scheduler")
+subdirs("_phyriad_build/node")
+subdirs("_phyriad_build/graph")
+subdirs("_phyriad_build/profile")
+subdirs("_phyriad_build/runtime")
+subdirs("_phyriad_build/tuning")
+subdirs("_phyriad_build/process")
+subdirs("_phyriad_build/etw")
+subdirs("_phyriad_build/stigmergy")
+subdirs("_phyriad_build/ipc")
+subdirs("_deps/glfw-build")
+subdirs("_phyriad_build/render")
+subdirs("_phyriad_build/ui")
+subdirs("observer")
+subdirs("learn")
+subdirs("policy")
+subdirs("action")
+subdirs("bench")
+subdirs("ipc")
+subdirs("config")
+subdirs("core")
+subdirs("tools/phynned-agent")
+subdirs("tools/phynned-cli")
+subdirs("tools/phynned-bench")
+subdirs("tools/phynned-acprobe")
+subdirs("tools/phynned-revert")
+subdirs("tools/installer")
+subdirs("tools/phynned-ui")

@@ -18,7 +18,7 @@
 
 #define PHYNNED_VERSION_MAJOR 0   // x-release-please-major
 #define PHYNNED_VERSION_MINOR 2   // x-release-please-minor
-#define PHYNNED_VERSION_PATCH 0   // x-release-please-patch
+#define PHYNNED_VERSION_PATCH 1   // x-release-please-patch
 
 // Optional pre-release tag. "experimental" while Phynned tracks the
 // student-exploration phase of Phyriad; empty for a final release.
@@ -30,5 +30,5 @@
 #define PHYNNED_VERSION \
     PHYNNED_MAKE_VERSION(PHYNNED_VERSION_MAJOR, PHYNNED_VERSION_MINOR, PHYNNED_VERSION_PATCH)
 
-#define PHYNNED_VERSION_STRING "0.2.0-experimental"  // x-release-please-version
+#define PHYNNED_VERSION_STRING "0.2.1-experimental"  // x-release-please-version
 // Made with my soul - Swately <3

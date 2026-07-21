@@ -17,6 +17,7 @@
 #include <phyriad/schema/Error.hpp>
 
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <span>
 #include <phyriad/hal/MemoryOrder.hpp>
@@ -41,7 +42,53 @@ public:
 
     [[nodiscard]] bool is_connected() const noexcept { return layout_ != nullptr; }
 
+    // ── Consistent snapshot (the CRASH fix, 2026-07-19) ───────────────────
+    // The raw span views below alias the LIVE mapping: the agent memcpys the
+    // whole targets/metrics arrays in place every tick, so any UI code that
+    // does multi-pass reads over the spans (std::sort comparators above all —
+    // an inconsistent comparator is UB that corrupted the heap and crashed
+    // phynned-ui after hours, root-caused byte-level from the WER dump) MUST
+    // copy first. read_snapshot() copies state+targets+metrics under the
+    // publisher's seqlock (retry ×4); even when every retry collides it still
+    // returns the last COPY — possibly torn across entries, but immutable, so
+    // sorting it is always well-defined. Names are force-terminated.
+    struct UiSnapshot {
+        PhynnedStateHeader      state{};
+        observer::TargetProcess targets[observer::kMaxShmTargets]{};
+        observer::TargetMetrics metrics[observer::kMaxShmTargets]{};
+        uint32_t                n{0u};       ///< consistent entry count
+        bool                    clean{false};///< true = seqlock-consistent copy
+    };
+
+    bool read_snapshot(UiSnapshot& out) const noexcept {
+        if (!layout_) { out.n = 0u; out.clean = false; return false; }
+        out.clean = false;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const uint32_t s0 = phyriad::hal::seq_load_acquire(layout_->header.seq);
+            if (s0 & 1u) continue;   // writer in progress
+            std::memcpy(&out.state, &layout_->state, sizeof(out.state));
+            uint32_t n = out.state.n_targets;
+            if (n > observer::kMaxShmTargets) n = observer::kMaxShmTargets;
+            std::memcpy(out.targets, layout_->targets,
+                        n * sizeof(observer::TargetProcess));
+            std::memcpy(out.metrics, layout_->metrics,
+                        n * sizeof(observer::TargetMetrics));
+            out.n = n;
+            const uint32_t s1 = phyriad::hal::seq_load_acquire(layout_->header.seq);
+            if (s0 == s1) { out.clean = true; break; }
+        }
+        // Harden the strings regardless: a torn row may lack the terminator.
+        for (uint32_t i = 0u; i < out.n; ++i) {
+            out.targets[i].name[sizeof(out.targets[i].name) - 1u] = '\0';
+            out.metrics[i].window_title[sizeof(out.metrics[i].window_title) - 1u] = '\0';
+        }
+        return out.n > 0u;
+    }
+
     // ── Read-only views — valid while connected() ─────────────────────────
+    // WARNING: these alias live shared memory (see read_snapshot above).
+    // Single-pass display reads only; NEVER feed them to std::sort or any
+    // multi-pass algorithm.
     [[nodiscard]] std::span<const observer::TargetProcess> targets() const noexcept {
         if (!layout_) return {};
         // Clamp to the SHM view cap — the agent publishes at most kMaxShmTargets,

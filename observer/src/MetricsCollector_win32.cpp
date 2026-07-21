@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <bitset>     // eviction sweep (2026-07-19 soak fix)
 #include <phyriad/hal/MemoryOrder.hpp>
 
 // Link: pdh.lib (CMakeLists links it)
@@ -202,14 +203,47 @@ MetricsCollector::find_or_create_pid_state(uint32_t pid) noexcept {
         // re-create (rare; happens if PID was recycled).
     }
 
-    if (n_pid_states_ >= kMaxPidStates) return nullptr;
-    const uint32_t new_idx = n_pid_states_++;
+    // Eviction fix (2026-07-19): pop a freed slot before growing the
+    // high-water mark — without this the table saturated permanently after
+    // 1024 distinct PIDs and every new process went metrics-blind.
+    uint32_t new_idx;
+    if (n_free_slots_ > 0u) {
+        new_idx = free_slots_[--n_free_slots_];
+    } else if (n_pid_states_ < kMaxPidStates) {
+        new_idx = n_pid_states_++;
+    } else {
+        return nullptr;
+    }
     PidState& s = pid_states_[new_idx];
     s = PidState{};
     s.pid   = pid;
     s.valid = true;
     pid_hash_insert(pid, static_cast<uint16_t>(new_idx));
     return &s;
+}
+
+// ── evict_absent_pids — long-run eviction sweep (2026-07-19 soak fix) ──────
+// `pids[0..n)` is the authoritative live tracked set sample() was handed this
+// tick. Any valid PidState not in it belongs to a process that died or left
+// the touchable set → evict (tombstone hash, free hot-track slot, push the
+// PidState slot on the free list). If the process comes back it is simply
+// re-created fresh — which is also the CORRECT answer for a recycled PID.
+void MetricsCollector::evict_absent_pids(const uint32_t* pids,
+                                          uint32_t n) noexcept {
+    std::bitset<kMaxPidStates> live{};
+    for (uint32_t i = 0u; i < n; ++i) {
+        const int32_t s = pid_hash_lookup(pids[i]);
+        if (s >= 0) live.set(static_cast<size_t>(s));
+    }
+    for (uint32_t s = 0u; s < n_pid_states_; ++s) {
+        PidState& st = pid_states_[s];
+        if (!st.valid || live.test(s)) continue;
+        pid_hash_remove(st.pid);
+        release_hot_track(st);
+        st = PidState{};   // valid=false
+        if (n_free_slots_ < kMaxPidStates)
+            free_slots_[n_free_slots_++] = static_cast<uint16_t>(s);
+    }
 }
 
 // ── acquire_hot_track — lazily claim a fat hot-thread slot (routed few) ─────
@@ -223,8 +257,17 @@ MetricsCollector::acquire_hot_track(PidState& s) noexcept {
         // Slot was recycled to another PID — drop the stale handle, re-claim.
         s.hot_slot_plus_1 = 0u;
     }
-    if (n_hot_track_ >= kMaxHotTrackStates) return nullptr;  // pool full → skip
-    const uint32_t idx = n_hot_track_++;
+    // Eviction fix (2026-07-19): freed slots are reusable — previously the
+    // pool saturated permanently after 128 distinct busy processes and every
+    // later game silently lost hot-thread tracking.
+    uint32_t idx;
+    if (n_hot_free_ > 0u) {
+        idx = hot_free_[--n_hot_free_];
+    } else if (n_hot_track_ < kMaxHotTrackStates) {
+        idx = n_hot_track_++;
+    } else {
+        return nullptr;  // pool full → skip (graceful)
+    }
     HotTrackState& hs = hot_track_[idx];
     hs = HotTrackState{};
     hs.owner_pid = s.pid;
@@ -280,6 +323,14 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
     // Always — cheap now with O(1) hash lookup.
     drain_etw_ring();
 
+    // ── 1b. Long-run eviction sweep (2026-07-19 soak fix) ─────────────────
+    // ~every 30 s: drop PidStates for PIDs no longer in the tracked set so
+    // hours of process churn can never saturate the 1024-slot table.
+    if (++evict_sweep_counter_ >= kEvictSweepInterval) {
+        evict_sweep_counter_ = 0u;
+        evict_absent_pids(pids, n);
+    }
+
     // ── 2. Bulk capture (FR-11) — ONE syscall for all processes ──────────
     // Throttled to every kBulkCaptureInterval ticks
     // (500 ms). Previously called every 100 ms = 10×/sec for hundreds of
@@ -321,6 +372,24 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
 
         if (snapshot_ok) {
             const phyriad::proc::ProcessMetrics& pm = bulk[i];
+
+            // ── PID-REUSE GUARD (2026-07-19 soak fix) ─────────────────────
+            // Per-process CPU times are MONOTONIC for a live process. A fresh
+            // sample BELOW our stored baseline means Windows recycled this pid
+            // onto a NEW process (the LoL relaunch pattern) — every cached
+            // field belongs to the dead one, and the unsigned delta below
+            // would wrap to garbage. Reset to a fresh state (slot + hash entry
+            // kept; stale hot-track handle released). Costs one 0% tick for
+            // the reborn pid — correct, since we have no real baseline yet.
+            if (state->prev_wall_ticks != 0u &&
+                (pm.kernel_time_100ns < state->prev_kernel_100ns ||
+                 pm.user_time_100ns   < state->prev_user_100ns)) {
+                const uint32_t keep_pid = state->pid;
+                release_hot_track(*state);
+                *state = PidState{};
+                state->pid   = keep_pid;
+                state->valid = true;
+            }
 
             // ── CPU % from 100ns-unit deltas (delta spans the throttle window) ─
             const uint64_t cpu_delta_100ns =

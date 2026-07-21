@@ -1,8 +1,11 @@
 // tools/phynned-ui/widgets/targets_panel.hpp
 // Targets panel — table of processes observed by Phynned.
 //
-// Reads targets[] and metrics[] DIRECTLY from PhynnedClient (not the Ring)
-// to avoid copying the large arrays (~6KB) each frame.
+// Reads a SEQLOCK-CONSISTENT COPY of targets[]/metrics[] each frame via
+// PhynnedClient::read_snapshot (~12KB memcpy at 60Hz — negligible). Never
+// sorts/renders the live SHM spans: the 0.2.0 soak crash was root-caused to
+// std::sort over live memory the agent rewrites mid-frame (unstable
+// comparator = heap-corrupting UB).
 //
 // Columns: PID | Name | Kind | CPU% | Migrations/s | Frame P99 | Pressure |
 //          Affinity | WS(MB) | Advice
@@ -20,6 +23,7 @@
 #include <imgui.h>
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <algorithm>
 #include <vector>
 
@@ -109,8 +113,16 @@ inline void draw_targets_panel(const PhynnedAppState& s,
         return;
     }
 
-    const auto targets = ac->targets();
-    const auto metrics = ac->metrics();
+    // CRASH FIX (2026-07-19, root-caused from the WER dump): NEVER sort/render
+    // the live SHM spans — the agent rewrites them mid-frame and an unstable
+    // std::sort comparator is heap-corrupting UB. Copy once per frame under
+    // the publisher's seqlock and work exclusively on the copy.
+    static phynned::ipc::PhynnedClient::UiSnapshot snap_buf;
+    (void)ac->read_snapshot(snap_buf);
+    const std::span<const phynned::observer::TargetProcess>
+        targets{snap_buf.targets, snap_buf.n};
+    const std::span<const phynned::observer::TargetMetrics>
+        metrics{snap_buf.metrics, snap_buf.n};
 
     if (targets.empty()) {
         ImGui::TextDisabled("No processes observed yet.");
