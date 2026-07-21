@@ -59,12 +59,24 @@ public:
     void sample(const uint32_t* pids, uint32_t n,
                 TargetMetrics* out_metrics) noexcept;
 
+    /// AC-QUIET mode (2026-07-21 BF6 soak fix): when a kernel anti-cheat game
+    /// is running, every OpenProcess the agent makes is inspected by the AC
+    /// driver system-wide — a per-tick handle storm stalls the agent AND
+    /// starves the game (BF6 → 6 fps, main thread stalled 10-14 s). In this
+    /// mode the collector skips the per-process affinity-mask OpenProcess (Fix
+    /// A): current_core_mask is emitted as 0 (the corral is suspended anyway,
+    /// so the field is not needed). The light bulk NtQSI metrics path (one
+    /// syscall, no per-process handle) still runs so the UI stays live.
+    void set_low_handle_mode(bool on) noexcept { low_handle_mode_ = on; }
+    [[nodiscard]] bool low_handle_mode() const noexcept { return low_handle_mode_; }
+
     [[nodiscard]] bool etw_active()            const noexcept { return etw_active_; }
     [[nodiscard]] bool frame_observer_active() const noexcept { return frame_obs_; }
 
 private:
     bool etw_active_{false};
     bool frame_obs_ {false};
+    bool low_handle_mode_{false};  // AC-quiet: skip Fix A OpenProcess (see setter)
 
     // ── Bulk process snapshot (FR-11) ──────────────────────────────────────
     // Initialised in start(); capture() called once per sample() invocation.

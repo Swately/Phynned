@@ -440,9 +440,11 @@ void MetricsCollector::sample(const uint32_t* pids, uint32_t n,
             // reads as "not a candidate" anyway, since a corral candidate must be
             // >= kCorralActiveCpuPct = 3%). This keeps the per-tick handle count
             // O(active few) instead of O(all touchable).
+            // AC-QUIET (2026-07-21): under a kernel anti-cheat, do NOT open a
+            // handle per active process — that is the storm the AC inspects.
             static constexpr float kCurrentMaskCpuFloor = 1.0f;
             out.current_core_mask =
-                (out.cpu_usage_pct >= kCurrentMaskCpuFloor)
+                (!low_handle_mode_ && out.cpu_usage_pct >= kCurrentMaskCpuFloor)
                     ? read_process_affinity_mask(pid)
                     : 0u;
 

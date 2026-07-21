@@ -55,6 +55,7 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <tlhelp32.h>   // AC-quiet: handle-free process-name snapshot
 // psapi.h no longer needed here — moved to MetricsCollector_win32.cpp
 // getpid() replaced by phyriad::proc::self_pid() (FR-18)
 #endif
@@ -120,6 +121,48 @@ static bool is_os_shell_process(const char* exe_name) noexcept {
 #endif
     }
     return false;
+}
+
+// ── AC-QUIET: handle-free scan for a running kernel-anti-cheat game ────────
+// (2026-07-21 BF6 soak fix.) Returns the most-restrictive AcClass among ALL
+// running process names, or None. CRITICAL: uses a Toolhelp SNAPSHOT — it
+// enumerates process NAMES without OpenProcess-ing anything, so it does NOT
+// trip the anti-cheat's NtOpenProcess hook (unlike enumerate_processes, which
+// opens a handle per PID). It must see the game even though the observer
+// EXCLUDES do-not-probe AC titles from the tracked set — so scanning the
+// tracked target_buf would miss BF6 entirely. classify_title is a pure string
+// map (no handle). Only CleanBlock_A / SilentPunish_C / UnknownAc count as a
+// "go quiet" trigger; None and the affinity-safe always-on Allow_B do not.
+static observer::AcClass scan_running_for_kernel_ac() noexcept {
+#ifdef _WIN32
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return observer::AcClass::None;
+    observer::AcClass worst = observer::AcClass::None;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            char name[64];
+            uint32_t i = 0u;
+            for (; pe.szExeFile[i] != L'\0' && i < sizeof(name) - 1u; ++i)
+                name[i] = (pe.szExeFile[i] < 0x80)
+                          ? static_cast<char>(pe.szExeFile[i]) : '?';
+            name[i] = '\0';
+            const observer::AcClass k =
+                observer::AcDriverOracle::classify_title(name);
+            if (k == observer::AcClass::CleanBlock_A ||
+                k == observer::AcClass::SilentPunish_C ||
+                k == observer::AcClass::UnknownAc) {
+                worst = k;
+                if (k == observer::AcClass::UnknownAc) break;  // most restrictive
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return worst;
+#else
+    return observer::AcClass::None;
+#endif
 }
 
 // ── Get short exe name from PID ───────────────────────
@@ -496,6 +539,24 @@ struct AgentRuntime::Impl {
     // direct-mapped table pattern as corral_log_cache).
     struct UserPinLogSlot { uint32_t pid{0u}; uint8_t last_state{0xFFu}; };
     std::array<UserPinLogSlot, kAdviceLogSlots> user_pin_log_cache{};
+
+    // ── AC-QUIET mode (2026-07-21 BF6 soak fix) ───────────────────────────
+    // A kernel anti-cheat game (BF6/Javelin, EAC, ...) hooks OpenProcess
+    // system-wide; the agent's per-tick mass handle activity (coexistence
+    // full-scan, per-process affinity queries, corral applies) then gets
+    // inspected by the AC driver on every call → the main thread stalled
+    // 10-14 s (Watchdog CRITICAL → clean-shutdown) and the game starved to
+    // 6 fps. When a protected title is detected in the tracked set (via the
+    // zero-handle title map), the agent reverts all placements and goes inert:
+    // no coexistence full-scan, no corral, no user pins, collector in
+    // low-handle mode. Detection is a pure string scan — it opens NO handle.
+    bool     ac_quiet{false};
+    uint8_t  ac_quiet_reason_class{0u};   // AcClass that triggered (for logs/SHM)
+    uint32_t ac_scan_counter{0u};         // throttle the handle-free Toolhelp scan
+    // Scan every 3 ticks: fast enough to catch a game launch within a few
+    // seconds, cheap enough (one snapshot) to be negligible. Counter starts at
+    // interval-1 conceptually via the pre-increment so the FIRST tick scans.
+    static constexpr uint32_t kAcScanInterval = 3u;
 
     // ── A/B benchmark runner ──────────────────────────────────────────────
     bench::ABRunner                 ab_runner{};   // controlled via IPC commands
@@ -1390,6 +1451,41 @@ void AgentRuntime::run() noexcept {
             (void)impl_->executor.prune_dead(live_pids, impl_->n_targets);
         }
 
+        // ── 1c. AC-QUIET detection (2026-07-21 BF6 soak fix) ─────────────
+        // Handle-free Toolhelp scan for a running kernel-AC game (throttled).
+        // MUST scan ALL running processes, not target_buf: the observer
+        // EXCLUDES do-not-probe AC titles (BF6) from the tracked set, so a
+        // target_buf scan would never see it. The scan opens NO per-process
+        // handle → it does not trip the AC's OpenProcess hook. Runs even while
+        // quiet (to detect when the game exits and resume).
+        if (++impl_->ac_scan_counter >= Impl::kAcScanInterval) {
+            impl_->ac_scan_counter = 0u;
+            const observer::AcClass k = scan_running_for_kernel_ac();
+            const bool ac_now = (k != observer::AcClass::None);
+            const uint8_t cls = static_cast<uint8_t>(k);
+            if (ac_now && !impl_->ac_quiet) {
+                // ENTER quiet mode: revert everything we placed, then go inert.
+                // Leave the machine clean for the game (do-no-harm).
+                const uint32_t rc =
+                    impl_->executor.revert_by_rule_id(kCorralRuleId);
+                const uint32_t ru =
+                    impl_->executor.revert_by_rule_id(kUserRuleId);
+                std::fprintf(stdout,
+                    "[Phynned][AC-QUIET] kernel anti-cheat game detected -> "
+                    "SUSPENDING placement + heavy scans (reverted %u corral + "
+                    "%u user pins). Mass handle activity would stall the agent "
+                    "and the game.\n", rc, ru);
+            } else if (!ac_now && impl_->ac_quiet) {
+                std::fprintf(stdout,
+                    "[Phynned][AC-QUIET] anti-cheat game gone -> RESUMING "
+                    "normal operation.\n");
+            }
+            impl_->ac_quiet = ac_now;
+            impl_->ac_quiet_reason_class = ac_now ? cls : 0u;
+            // Collector: stop opening a handle per active process while quiet.
+            impl_->metrics.set_low_handle_mode(ac_now);
+        }
+
         // ── 2. Sample metrics ─────────────────────────────────────────────
         PHYNNED_PHASE(diag::PhaseMetricsSample);
         if (impl_->n_targets > 0u) {
@@ -1565,7 +1661,8 @@ void AgentRuntime::run() noexcept {
             for (uint32_t r = 0u; r < n_rules; ++r)
                 impl_->user_rule_flags[r] = 0u;
 
-            if (placement_allowed && !impl_->policies_paused && n_rules > 0u) {
+            if (placement_allowed && !impl_->policies_paused &&
+                !impl_->ac_quiet && n_rules > 0u) {  // AC-quiet: no user pins
                 uint32_t n_logged = 0u;
                 for (uint32_t i = 0u; i < impl_->n_targets; ++i) {
                     const observer::TargetProcess& tp = impl_->target_buf[i];
@@ -1695,7 +1792,12 @@ void AgentRuntime::run() noexcept {
             // tracked-only scan would miss it, letting the corral flap against it.
             // Runs on the first tick (counter starts 0) so the guard is armed
             // before the switch could ever be flipped.
-            if (impl_->coexist_scan_counter == 0u) {
+            // AC-QUIET (2026-07-21): enumerate_processes opens a handle PER PID
+            // over the whole box (~200) — this is the single biggest handle
+            // storm and exactly what a kernel anti-cheat inspects. Skip it
+            // entirely while quiet (the corral is suspended anyway, so its
+            // coexistence guard is moot).
+            if (!impl_->ac_quiet && impl_->coexist_scan_counter == 0u) {
                 static thread_local phyriad::proc::ProcessEntry
                     s_coexist[phyriad::proc::kMaxProcesses];
                 const uint32_t nn = phyriad::proc::enumerate_processes(
@@ -1725,6 +1827,7 @@ void AgentRuntime::run() noexcept {
             // kept explicit to mirror the master-gate at every feed point.
             const bool corral_apply =
                 impl_->corral_live && !coexist && placement_allowed &&
+                !impl_->ac_quiet &&   // AC-quiet: never place while a kernel AC is live
                 eff_profile == config::Profile::GamesCorral;
 
             uint32_t n_logged = 0u;
