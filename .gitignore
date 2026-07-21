@@ -28,3 +28,4 @@ phynned-*-windows-x64.zip
 
 # tool binaries built ad-hoc
 tools/hwinfo_shm/*.exe
+build-relsym/
